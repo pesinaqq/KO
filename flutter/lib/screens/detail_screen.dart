@@ -336,6 +336,12 @@ class _DetailScreenState extends ConsumerState<DetailScreen> {
         _status = '独立窗口播放失败：$msg';
       });
     };
+    // 独立窗口内点选集：由主窗口解析新集 URL 并切集。
+    PlaybackWindow.onSwitchEpisode = (idx) {
+      if (!mounted) return;
+      if (idx < 0 || idx >= _eps.length) return;
+      unawaited(_playAt(idx));
+    };
     _load();
   }
 

@@ -112,6 +112,9 @@ class PlaybackWindow {
   /// 独立窗口播放出错回调。
   static void Function(String message)? onPlaybackError;
 
+  /// 独立窗口请求切换剧集（子窗口 → 主窗口，主窗口负责解析新集 URL）。
+  static void Function(int epIdx)? onSwitchEpisode;
+
   /// 主窗口启动时注册一次：接收独立窗口上报。
   static Future<void> initHost() async {
     if (kIsWeb) return;
@@ -125,6 +128,13 @@ class PlaybackWindow {
           case 'error':
             onPlaybackError?.call('${call.arguments ?? ''}');
             return 'ok';
+          case 'switchEpisode':
+            final idx = (call.arguments as num?)?.toInt();
+            if (idx != null) {
+              onSwitchEpisode?.call(idx);
+              return 'ok';
+            }
+            return 'bad_args';
         }
         return null;
       });
@@ -211,16 +221,18 @@ class PlaybackWindowPage extends StatefulWidget {
   State<PlaybackWindowPage> createState() => _PlaybackWindowPageState();
 }
 
-class _PlaybackWindowPageState extends State<PlaybackWindowPage>
-    with WindowListener {
+class _PlaybackWindowPageState extends State<PlaybackWindowPage> {
   MediaKitPlayback? _mk;
   late PlaybackWindowArgs _args = widget.args;
   String _status = '';
   bool _showChrome = true;
   Timer? _hideTimer;
   StreamSubscription<Duration>? _posSub;
+  StreamSubscription<void>? _winChangeSub;
   Duration _pos = Duration.zero;
   bool _busy = false;
+  bool _epPanel = false;
+  Timer? _switchTimeout;
 
   BoxFit get _fit {
     try {
@@ -246,23 +258,44 @@ class _PlaybackWindowPageState extends State<PlaybackWindowPage>
     });
     const ch = WindowMethodChannel('kotv_playback', mode: ChannelMode.unidirectional);
     unawaited(ch.setMethodCallHandler(_onPlayCall));
+    // 兜底：窗口被系统直接关闭（窗口列表里消失）时也复位主窗口。
+    _winChangeSub = onWindowsChanged.listen((_) {
+      unawaited(_checkAlive());
+    });
     unawaited(_open(_args));
   }
 
+  /// 子窗口里 window_manager 只用于「本窗口」的显示层操作；
+  /// 绝不调用 destroy()——其 PostQuitMessage(0) 打在主消息循环上会连主窗口一起退出。
   Future<void> _initWindow() async {
     if (kIsWeb) return;
     try {
-      await windowManager.ensureInitialized();
-      await windowManager.setTitle('KO影视');
-      await windowManager.setMinimumSize(const Size(420, 280));
-      await windowManager.setPreventClose(true);
-      windowManager.addListener(this);
-      WidgetsBinding.instance.addPostFrameCallback((_) {
-        unawaited(windowManager.center());
+      WidgetsBinding.instance.addPostFrameCallback((_) async {
+        try {
+          await windowManager.ensureInitialized();
+          await windowManager.setTitle('KO影视');
+          await windowManager.setMinimumSize(const Size(420, 280));
+          await windowManager.center();
+        } catch (e) {
+          debugPrint('playback window init failed: $e');
+        }
       });
     } catch (e) {
       debugPrint('playback window init failed: $e');
     }
+  }
+
+  Future<void> _checkAlive() async {
+    try {
+      final me = await WindowController.fromCurrentEngine();
+      final all = await WindowController.getAll();
+      final alive = all.any((w) => w.windowId == me.windowId);
+      if (!alive) {
+        // 本窗口已被系统关闭：通知主窗口并释放播放器。
+        await _notifyClosed();
+        await _disposePlayback();
+      }
+    } catch (_) {}
   }
 
   Future<dynamic> _onPlayCall(MethodCall call) async {
@@ -285,11 +318,13 @@ class _PlaybackWindowPageState extends State<PlaybackWindowPage>
     final mk = _mk;
     if (mk == null || _busy) return;
     _busy = true;
+    _switchTimeout?.cancel();
     try {
       setState(() {
         _args = args;
         _status = '加载中…';
         _pos = Duration.zero;
+        _epPanel = false;
       });
       try {
         await mk.stop();
@@ -320,6 +355,14 @@ class _PlaybackWindowPageState extends State<PlaybackWindowPage>
     }
   }
 
+  Future<void> _notifyClosed() async {
+    if (kIsWeb) return;
+    try {
+      await const WindowMethodChannel('kotv_playback_host', mode: ChannelMode.unidirectional)
+          .invokeMethod('closed');
+    } catch (_) {}
+  }
+
   Future<void> _notifyError(String message) async {
     if (kIsWeb) return;
     try {
@@ -328,22 +371,39 @@ class _PlaybackWindowPageState extends State<PlaybackWindowPage>
     } catch (_) {}
   }
 
-  Future<void> _close() async {
-    // 先通知主窗口复位，再停播放并关窗。
+  /// 请求主窗口解析并切换到第 [idx] 集（主窗口走 popup 分支回传新 playUrl）。
+  Future<void> _requestEpisode(int idx) async {
+    if (idx == _args.epIdx) return;
+    final mk = _mk;
+    if (mk == null) return;
+    _switchTimeout?.cancel();
+    setState(() {
+      _epPanel = false;
+      _status = '切换中…';
+    });
     try {
-      await const WindowMethodChannel('kotv_playback_host', mode: ChannelMode.unidirectional)
-          .invokeMethod('closed');
+      await mk.stop();
     } catch (_) {}
+    _switchTimeout = Timer(const Duration(seconds: 10), () {
+      if (mounted && _status == '切换中…') setState(() => _status = '');
+    });
+    if (!kIsWeb) {
+      try {
+        await const WindowMethodChannel('kotv_playback_host', mode: ChannelMode.unidirectional)
+            .invokeMethod('switchEpisode', idx);
+      } catch (_) {
+        if (mounted) setState(() => _status = '');
+      }
+    }
+  }
+
+  Future<void> _close() async {
+    // 先通知主窗口复位，再停播放，最后仅关闭本窗口（不 destroy）。
+    await _notifyClosed();
     await _disposePlayback();
     if (kIsWeb) return;
     try {
-      await windowManager.setPreventClose(false);
-    } catch (_) {}
-    try {
       await windowManager.close();
-    } catch (_) {}
-    try {
-      await windowManager.destroy();
     } catch (_) {}
   }
 
@@ -351,6 +411,7 @@ class _PlaybackWindowPageState extends State<PlaybackWindowPage>
     final mk = _mk;
     _mk = null;
     if (mk == null) return;
+    _switchTimeout?.cancel();
     try {
       await mk.stop();
     } catch (_) {}
@@ -363,26 +424,12 @@ class _PlaybackWindowPageState extends State<PlaybackWindowPage>
   }
 
   @override
-  void onWindowClose() async {
-    await _disposePlayback();
-    try {
-      await windowManager.setPreventClose(false);
-    } catch (_) {}
-    try {
-      await windowManager.destroy();
-    } catch (_) {}
-  }
-
-  @override
   void dispose() {
     _hideTimer?.cancel();
+    _switchTimeout?.cancel();
     _posSub?.cancel();
+    _winChangeSub?.cancel();
     unawaited(_disposePlayback());
-    if (!kIsWeb) {
-      try {
-        windowManager.removeListener(this);
-      } catch (_) {}
-    }
     super.dispose();
   }
 
@@ -588,6 +635,15 @@ class _PlaybackWindowPageState extends State<PlaybackWindowPage>
                                       Text(_fmt(dur), style: const TextStyle(color: Colors.white70, fontSize: 12)),
                                       const SizedBox(width: 8),
                                       _VolumeButton(player: mk),
+                                      const SizedBox(width: 4),
+                                      IconButton(
+                                        tooltip: '选集',
+                                        icon: const Icon(Icons.video_library_outlined, color: Colors.white, size: 22),
+                                        onPressed: () {
+                                          _bumpChrome();
+                                          setState(() => _epPanel = !_epPanel);
+                                        },
+                                      ),
                                     ],
                                   ),
                                 ],
@@ -597,7 +653,67 @@ class _PlaybackWindowPageState extends State<PlaybackWindowPage>
                   ),
                 ),
               ),
+              // 选集面板
+              if (_epPanel && _args.episodes.isNotEmpty)
+                Positioned(
+                  left: 0,
+                  right: 0,
+                  bottom: 84,
+                  child: Material(
+                    color: Colors.black.withOpacity(0.88),
+                    child: ConstrainedBox(
+                      constraints: const BoxConstraints(maxHeight: 240),
+                      child: SingleChildScrollView(
+                        padding: const EdgeInsets.all(12),
+                        child: Wrap(
+                          spacing: 8,
+                          runSpacing: 8,
+                          children: [
+                            for (var i = 0; i < _args.episodes.length; i++)
+                              _EpButton(
+                                label: _args.episodes[i],
+                                active: i == _args.epIdx,
+                                onTap: () => unawaited(_requestEpisode(i)),
+                              ),
+                          ],
+                        ),
+                      ),
+                    ),
+                  ),
+                ),
             ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class _EpButton extends StatelessWidget {
+  const _EpButton({required this.label, required this.active, required this.onTap});
+
+  final String label;
+  final bool active;
+  final VoidCallback onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    return InkWell(
+      onTap: onTap,
+      borderRadius: BorderRadius.circular(6),
+      child: Container(
+        padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+        decoration: BoxDecoration(
+          color: active ? const Color(0xFFE53955) : Colors.white12,
+          borderRadius: BorderRadius.circular(6),
+        ),
+        child: Text(
+          label,
+          maxLines: 1,
+          style: TextStyle(
+            color: active ? Colors.white : Colors.white70,
+            fontSize: 13,
+            fontWeight: active ? FontWeight.w700 : FontWeight.w400,
           ),
         ),
       ),
