@@ -13,30 +13,10 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - goos: linux
-            goarch: amd64
-            artifact: updater-linux-amd64
-            out: updater
-          - goos: linux
-            goarch: arm64
-            artifact: updater-linux-arm64
-            out: updater
           - goos: windows
             goarch: amd64
             artifact: updater-windows-amd64
             out: updater.exe
-          - goos: windows
-            goarch: arm64
-            artifact: updater-windows-arm64
-            out: updater.exe
-          - goos: darwin
-            goarch: amd64
-            artifact: updater-macos-amd64
-            out: updater
-          - goos: darwin
-            goarch: arm64
-            artifact: updater-macos-arm64
-            out: updater
     steps:
       - uses: actions/checkout@v4
 
