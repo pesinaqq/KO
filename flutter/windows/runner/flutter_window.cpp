@@ -1,12 +1,21 @@
 #include "flutter_window.h"
 
+#include <memory>
 #include <optional>
+#include <vector>
 
 #include <flutter/standard_method_codec.h>
 
 #include "flutter/generated_plugin_registrant.h"
 #include "desktop_multi_window/desktop_multi_window_plugin.h"
 #include "kotv_iface_rx.h"
+
+// 子窗口专用原生通道：销毁当前子窗口。
+// 必须绕过 WM_CLOSE——flutter_windows 引擎收到 WM_CLOSE 会走全局 RunLoop 的
+// PostQuitMessage，把主窗口连同整个进程一起退出。这里用 DestroyWindow 直接
+// 销毁子窗口根窗口（不经 WM_CLOSE），主窗口与进程保持存活。
+static std::vector<std::unique_ptr<flutter::MethodChannel<flutter::EncodableValue>>>
+    g_playback_window_channels;
 
 FlutterWindow::FlutterWindow(const flutter::DartProject& project)
     : project_(project) {}
@@ -29,12 +38,34 @@ bool FlutterWindow::OnCreate() {
     return false;
   }
   RegisterPlugins(flutter_controller_->engine());
-  // 独立播放窗口：每个子窗口注册全部插件（media_kit / window_manager 等）。
+  // 独立播放窗口：每个子窗口注册全部插件（media_kit / window_manager 等），
+  // 并注册「destroySelf」原生通道，供子窗口 Dart 侧安全关闭自身。
   DesktopMultiWindowSetWindowCreatedCallback([](void *controller) {
     auto *flutter_view_controller =
         reinterpret_cast<flutter::FlutterViewController *>(controller);
     auto *registry = flutter_view_controller->engine();
     RegisterPlugins(registry);
+
+    auto channel = std::make_unique<flutter::MethodChannel<flutter::EncodableValue>>(
+        flutter_view_controller->engine()->messenger(), "kotv_playback_native",
+        &flutter::StandardMethodCodec::GetInstance());
+    channel->SetMethodCallHandler(
+        [flutter_view_controller](const flutter::MethodCall<flutter::EncodableValue> &call,
+           std::unique_ptr<flutter::MethodResult<flutter::EncodableValue>> result) {
+          if (call.method_name() == "destroySelf") {
+            HWND hwnd = flutter_view_controller->view()->GetNativeWindow();
+            if (hwnd) {
+              HWND root = ::GetAncestor(hwnd, GA_ROOT);
+              if (root) {
+                ::DestroyWindow(root);
+              }
+            }
+            result->Success(flutter::EncodableValue(true));
+          } else {
+            result->NotImplemented();
+          }
+        });
+    g_playback_window_channels.push_back(std::move(channel));
   });
   RegisterHostChannel();
   SetChildContent(flutter_controller_->view()->GetNativeWindow());

@@ -221,7 +221,8 @@ class PlaybackWindowPage extends StatefulWidget {
   State<PlaybackWindowPage> createState() => _PlaybackWindowPageState();
 }
 
-class _PlaybackWindowPageState extends State<PlaybackWindowPage> {
+class _PlaybackWindowPageState extends State<PlaybackWindowPage>
+    with WindowListener {
   MediaKitPlayback? _mk;
   late PlaybackWindowArgs _args = widget.args;
   String _status = '';
@@ -265,8 +266,8 @@ class _PlaybackWindowPageState extends State<PlaybackWindowPage> {
     unawaited(_open(_args));
   }
 
-  /// 子窗口里 window_manager 只用于「本窗口」的显示层操作；
-  /// 绝不调用 destroy()——其 PostQuitMessage(0) 打在主消息循环上会连主窗口一起退出。
+  /// 子窗口里 window_manager 只用于「本窗口」的显示层 + 拦截系统关闭；
+  /// 绝不调用 destroy()（PostQuitMessage(0) 打在主消息循环上会连主窗口一起退出）。
   Future<void> _initWindow() async {
     if (kIsWeb) return;
     try {
@@ -276,6 +277,11 @@ class _PlaybackWindowPageState extends State<PlaybackWindowPage> {
           await windowManager.setTitle('KO影视');
           await windowManager.setMinimumSize(const Size(420, 280));
           await windowManager.center();
+          // 拦截系统标题栏关闭（×）：WM_CLOSE 到 Flutter 引擎会触发全局
+          // RunLoop 的 PostQuitMessage，把主窗口一起退出。拦截后走 Dart
+          // onWindowClose → destroySelf（原生 DestroyWindow，绕过 WM_CLOSE）。
+          await windowManager.setPreventClose(true);
+          windowManager.addListener(this);
         } catch (e) {
           debugPrint('playback window init failed: $e');
         }
@@ -398,13 +404,25 @@ class _PlaybackWindowPageState extends State<PlaybackWindowPage> {
   }
 
   Future<void> _close() async {
-    // 先通知主窗口复位，再停播放，最后仅关闭本窗口（不 destroy）。
+    // 先通知主窗口复位，再停播放，最后原生销毁本窗口（绕过 WM_CLOSE）。
     await _notifyClosed();
     await _disposePlayback();
     if (kIsWeb) return;
     try {
-      await windowManager.close();
-    } catch (_) {}
+      await const MethodChannel('kotv_playback_native')
+          .invokeMethod('destroySelf');
+    } catch (_) {
+      // Linux 等未注册原生通道的环境：退回 window_manager.close()。
+      try {
+        await windowManager.close();
+      } catch (_) {}
+    }
+  }
+
+  /// 系统标题栏关闭被 setPreventClose 拦截后回调：走同一关闭路径。
+  @override
+  void onWindowClose() async {
+    await _close();
   }
 
   Future<void> _disposePlayback() async {
@@ -429,6 +447,11 @@ class _PlaybackWindowPageState extends State<PlaybackWindowPage> {
     _switchTimeout?.cancel();
     _posSub?.cancel();
     _winChangeSub?.cancel();
+    if (!kIsWeb) {
+      try {
+        windowManager.removeListener(this);
+      } catch (_) {}
+    }
     unawaited(_disposePlayback());
     super.dispose();
   }
