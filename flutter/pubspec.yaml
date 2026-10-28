@@ -37,4 +37,20 @@ flutter:
   uses-material-design: true
   assets:
     - assets/engine/
-  # 内嵌字体仅 Win7 线：adapt-flutter-win7-sdk.sh 注入 fonts + fetch-flutter-fonts.sh（KOTV_WIN7=1）
+  # 内嵌 Noto 字体（全平台）：中文界面用 NotoSansSC 提升渲染质感；emoji 彩色/黑白兜底。
+  # 注：Win7 线 adapt-flutter-win7-sdk.sh 检测到 NotoSansSC 已注册会跳过注入，互不冲突。
+  fonts:
+    - family: NotoSansSC
+      fonts:
+        - asset: assets/fonts/NotoSansSC-Regular.otf
+          weight: 400
+        - asset: assets/fonts/NotoSansSC-Bold.otf
+          weight: 700
+    - family: NotoColorEmoji
+      fonts:
+        - asset: assets/fonts/NotoColorEmoji.ttf
+          weight: 400
+    - family: NotoEmoji
+      fonts:
+        - asset: assets/fonts/NotoEmoji.ttf
+          weight: 400

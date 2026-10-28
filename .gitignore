@@ -46,10 +46,11 @@ flutter/assets/engine/libkotv_engine.so
 flutter/assets/engine/kotv-engine
 flutter/assets/engine/kotv-engine.exe
 
-# 开源内嵌字体（仅 Win7 线 ~28MB，KOTV_WIN7=1 + fetch-flutter-fonts.sh）
-flutter/assets/fonts/*.otf
-flutter/assets/fonts/*.ttf
-flutter/assets/fonts/LICENSE*
+# 开源内嵌字体（0.1.0 美化后全平台内置 NotoSansSC/emoji，随主线上传；
+# Win7 线 fetch-flutter-fonts.sh 检测文件已存在会跳过下载，无需再忽略）
+# flutter/assets/fonts/*.otf
+# flutter/assets/fonts/*.ttf
+# flutter/assets/fonts/LICENSE*
 
 # Flutter Web 构建产物（package-flutter-web.sh）
 /webapp/

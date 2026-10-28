@@ -118,15 +118,15 @@ fi
 
 # ModuleLoader CGO 依赖 quickjs-go 头文件（qjsinc/ 不入库，构建前生成）
 echo "generating spider qjsinc headers..."
-(cd "$ROOT/internal/spider" && go run gen_qjsinc.go)
+(cd "$ROOT/internal/spider" && env -u GOOS -u GOARCH -u CC -u CXX CGO_ENABLED=0 go run gen_qjsinc.go)
 
 LDFLAGS="-s -w -X github.com/bobo/KOTV/internal/update.CurrentVersion=${VERSION}"
 if [[ "$PLAT" == "windows-x64" ]]; then
   # 最终链接：静态 MinGW 运行时 + 强制静态 winpthread（crawshaw/QuickJS）+ Win7 子系统
   EXTLD="-static-libgcc -static-libstdc++ ${WIN_PTHREAD_LD:--Wl,-Bstatic -l:libwinpthread.a -Wl,-Bdynamic} -Wl,--subsystem,windows:6.01"
-  (cd "$ROOT" && go build -ldflags "${LDFLAGS} -extldflags '${EXTLD}'" -o "$DIST/$BIN" .)
+  (cd "$ROOT" && go build -ldflags "${LDFLAGS} -extldflags '${EXTLD}'" -o "$DIST/$BIN" ./cmd/engine)
 else
-  (cd "$ROOT" && go build -ldflags "$LDFLAGS" -o "$DIST/$BIN" .)
+  (cd "$ROOT" && go build -ldflags "$LDFLAGS" -o "$DIST/$BIN" ./cmd/engine)
 fi
 
 if [[ "$PLAT" == "windows-x64" ]]; then

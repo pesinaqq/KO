@@ -25,13 +25,13 @@ class PosterCard extends StatelessWidget {
     return TvFocus(
       autofocus: autofocus,
       onPressed: onTap,
-      borderRadius: 10 * s,
+      borderRadius: 12 * s,
       child: MouseRegion(
         cursor: SystemMouseCursors.click,
         child: GestureDetector(
           onTap: onTap,
           child: ClipRRect(
-            borderRadius: BorderRadius.circular(10 * s),
+            borderRadius: BorderRadius.circular(12 * s),
             child: LayoutBuilder(
               builder: (context, c) {
                 if (!c.hasBoundedHeight || !c.hasBoundedWidth || c.maxHeight <= 0 || c.maxWidth <= 0) {
@@ -71,13 +71,20 @@ class PosterCard extends StatelessWidget {
                     ),
                     if (item.remarks.isNotEmpty)
                       Positioned(
-                        left: 5 * s,
+                        left: 6 * s,
                         bottom: remarkBottom,
                         child: Container(
-                          padding: EdgeInsets.symmetric(horizontal: 5 * s, vertical: 2 * s),
+                          padding: EdgeInsets.symmetric(horizontal: 6 * s, vertical: 2.5 * s),
                           decoration: BoxDecoration(
-                            color: p.primary.withOpacity(0.9),
-                            borderRadius: BorderRadius.circular(5 * s),
+                            color: p.primary.withOpacity(0.92),
+                            borderRadius: BorderRadius.circular(6 * s),
+                            boxShadow: [
+                              BoxShadow(
+                                color: Colors.black.withOpacity(0.35),
+                                blurRadius: 6 * s,
+                                offset: Offset(0, 2 * s),
+                              ),
+                            ],
                           ),
                           child: Text(
                             item.remarks,
@@ -90,6 +97,27 @@ class PosterCard extends StatelessWidget {
                           ),
                         ),
                       ),
+                    // 标题区渐变遮罩：亮海报上标题也清晰
+                    Positioned(
+                      left: 0,
+                      right: 0,
+                      bottom: 0,
+                      height: barH + 14 * s,
+                      child: DecoratedBox(
+                        decoration: BoxDecoration(
+                          gradient: LinearGradient(
+                            begin: Alignment.topCenter,
+                            end: Alignment.bottomCenter,
+                            stops: const [0.0, 0.55, 1.0],
+                            colors: [
+                              Colors.transparent,
+                              p.posterBar.withOpacity(0.55),
+                              p.posterBar.withOpacity(0.96),
+                            ],
+                          ),
+                        ),
+                      ),
+                    ),
                     Positioned(
                       left: 0,
                       right: 0,
@@ -97,7 +125,7 @@ class PosterCard extends StatelessWidget {
                       height: barH,
                       child: Container(
                         alignment: Alignment.center,
-                        color: p.posterBar,
+                        color: Colors.transparent,
                         padding: EdgeInsets.symmetric(horizontal: 5 * s, vertical: 2),
                         child: Text(
                           item.name,

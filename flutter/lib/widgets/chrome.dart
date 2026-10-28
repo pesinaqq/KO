@@ -400,6 +400,20 @@ class SectionTitle extends StatelessWidget {
       child: Row(
         crossAxisAlignment: CrossAxisAlignment.end,
         children: [
+          // 主题强调竖条：主色渐变，区块标题更有层次
+          Container(
+            width: 5,
+            height: 22,
+            margin: const EdgeInsets.only(right: 10, bottom: 2),
+            decoration: BoxDecoration(
+              borderRadius: BorderRadius.circular(3),
+              gradient: LinearGradient(
+                begin: Alignment.topCenter,
+                end: Alignment.bottomCenter,
+                colors: [p.primary, p.variant.withOpacity(0.35)],
+              ),
+            ),
+          ),
           Text(title, style: TextStyle(color: p.fg, fontSize: 24, fontWeight: FontWeight.w700)),
           if (subtitle.isNotEmpty) ...[
             const SizedBox(width: 12),

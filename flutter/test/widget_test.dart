@@ -1,30 +1,16 @@
-// This is a basic Flutter widget test.
-//
-// To perform an interaction with a widget in your test, use the WidgetTester
-// utility in the flutter_test package. For example, you can send tap and scroll
-// gestures. You can also use WidgetTester to find child widgets in the widget
-// tree, read text, and verify that the values of widget properties are correct.
+// 基础冒烟测试：默认主题色板为深色、主色为品牌粉。
+// （上游 1d16d78 自带的是 Flutter 模板 Counter 测试，引用已不存在的 MyApp，已替换为色板冒烟。）
 
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 
-import 'package:kotv/main.dart';
+import 'package:kotv/theme/kotv_palette.dart';
 
 void main() {
-  testWidgets('Counter increments smoke test', (WidgetTester tester) async {
-    // Build our app and trigger a frame.
-    await tester.pumpWidget(const MyApp());
-
-    // Verify that our counter starts at 0.
-    expect(find.text('0'), findsOneWidget);
-    expect(find.text('1'), findsNothing);
-
-    // Tap the '+' icon and trigger a frame.
-    await tester.tap(find.byIcon(Icons.add));
-    await tester.pump();
-
-    // Verify that our counter has incremented.
-    expect(find.text('0'), findsNothing);
-    expect(find.text('1'), findsOneWidget);
+  test('KotvPalette.defaults 是深色极光紫主色', () {
+    final p = KotvPalette.defaults;
+    expect(p.light, isFalse);
+    // 主色为品牌粉（美化后的 D84B82）
+    expect(p.primary, const Color(0xFFD84B82));
   });
 }

@@ -442,6 +442,11 @@ _win7_rework_latest_installer() {
 import json, os, sys, time, urllib.error, urllib.request
 
 repo = sys.argv[1]
+# (sandbox fallback) KOTV_CHROMIUM_WIN7_TAG overrides the GitHub API lookup
+env_tag = (os.environ.get("KOTV_CHROMIUM_WIN7_TAG") or "").strip()
+if env_tag:
+    print(env_tag + "\t" + f"https://github.com/{repo}/releases/download/{env_tag}/mini_installer_x64.exe")
+    raise SystemExit(0)
 url = f"https://api.github.com/repos/{repo}/releases?per_page=20"
 token = (os.environ.get("GITHUB_TOKEN") or os.environ.get("GH_TOKEN") or "").strip()
 headers = {

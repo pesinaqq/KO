@@ -83,8 +83,8 @@ ThemeData buildKotvTheme([KotvPalette palette = KotvPalette.defaults]) {
     outline: palette.outline,
   );
   final fallbacks = _kotvFontFallbacks();
-  // 仅 Win7 内嵌 NotoSansSC；其它平台用系统默认无衬线 + fallback 链。
-  final useEmbeddedCJK = !kIsWeb && Platform.isWindows && kotvIsWindows7();
+  // 内嵌 NotoSansSC 全平台启用（web 不预置字体走系统回退，其余平台统一中文渲染质感）
+  final useEmbeddedCJK = !kIsWeb;
   return ThemeData(
     useMaterial3: true,
     brightness: scheme.brightness,
@@ -175,9 +175,35 @@ ThemeData buildKotvTheme([KotvPalette palette = KotvPalette.defaults]) {
     ),
     dialogTheme: DialogThemeData(
       backgroundColor: palette.dialogBg,
+      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(22)),
       contentTextStyle: TextStyle(color: palette.fg, fontFamilyFallback: fallbacks),
       titleTextStyle: TextStyle(color: palette.fg, fontSize: 20, fontWeight: FontWeight.w700, fontFamilyFallback: fallbacks),
     ),
+    // 卡片：半透明浮层 + 圆角，适配壁纸背板
+    cardTheme: CardThemeData(
+      color: palette.surface.withOpacity(0.55),
+      surfaceTintColor: Colors.transparent,
+      elevation: 0,
+      margin: EdgeInsets.zero,
+      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(14)),
+    ),
+    // 提示条：浮动胶囊，避免整条铺底压住壁纸
+    snackBarTheme: SnackBarThemeData(
+      backgroundColor: palette.dialogBg,
+      contentTextStyle: TextStyle(color: palette.fg, fontFamilyFallback: fallbacks),
+      behavior: SnackBarBehavior.floating,
+      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(14)),
+    ),
+    // 滚动条：细条半透明，桌面观感更精致
+    scrollbarTheme: ScrollbarThemeData(
+      thumbColor: WidgetStatePropertyAll(palette.muted.withOpacity(0.32)),
+      radius: const Radius.circular(8),
+      thickness: const WidgetStatePropertyAll(6),
+    ),
+    // 列表悬浮/点击反馈更克制
+    splashFactory: InkSparkle.splashFactory,
+    highlightColor: Colors.transparent,
+    splashColor: palette.primary.withOpacity(0.12),
   );
 }
 
