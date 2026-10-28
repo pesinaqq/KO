@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:io';
 
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
@@ -8,6 +9,7 @@ import 'package:window_manager/window_manager.dart';
 
 import '../api/kotv_engine_url.dart';
 import '../desktop/mini_player_window.dart';
+import '../desktop/playback_window.dart';
 import '../models/models.dart';
 import '../player/danmaku_layer.dart';
 import '../player/exo_playback.dart';
@@ -98,6 +100,8 @@ class _DetailScreenState extends ConsumerState<DetailScreen> {
   /// 设置「自动切换播放器」：auto=开，off=关。
   String _prefPlayerFailover = 'auto';
   bool _miniDesktop = false;
+  /// 桌面端「独立播放窗口」：点击播放弹出系统独立窗口，主窗口保持浏览。
+  bool _popupPlayer = false;
   /// 当前是否磁力/BT 本地流（状态文案与卡顿语义不同）。
   bool _magnetPlay = false;
   Timer? _btProgressTimer;
@@ -317,6 +321,21 @@ class _DetailScreenState extends ConsumerState<DetailScreen> {
     super.initState();
     _active = this;
     kotvRegisterQuitHook(_prepareQuit);
+    // 独立播放窗口关闭 / 出错时复位本页状态。
+    PlaybackWindow.onPlaybackClosed = () {
+      if (!mounted) return;
+      setState(() {
+        _playUrl = '';
+        _status = '已停止';
+      });
+    };
+    PlaybackWindow.onPlaybackError = (msg) {
+      if (!mounted) return;
+      setState(() {
+        _playUrl = '';
+        _status = '独立窗口播放失败：$msg';
+      });
+    };
     _load();
   }
 
@@ -585,6 +604,11 @@ class _DetailScreenState extends ConsumerState<DetailScreen> {
         _prefPlayerVal = _playerVal;
         final failoverMode = '${settings['playerFailover'] ?? 'auto'}'.trim().toLowerCase();
         _prefPlayerFailover = (failoverMode == 'off' || failoverMode == 'false') ? 'off' : 'auto';
+        // 桌面端独立播放窗口：设置未显式配置时默认开启（仅桌面可用）。
+        final popupRaw = '${settings['popupPlayer'] ?? ''}'.trim();
+        _popupPlayer = popupRaw.isEmpty
+            ? kotvIsDesktop()
+            : popupRaw.toLowerCase() == 'true';
         // 绝不在进详情时创建 Player：libmpv 初始化 + VideoController 附着会卡死 UI / 手机闪退。
         // 音量/倍速等偏好先记下，真正 [_playAt] open 后再套。
         _prefSpeed = double.tryParse('${settings['playerSpeed'] ?? ''}');
@@ -948,6 +972,43 @@ class _DetailScreenState extends ConsumerState<DetailScreen> {
         lockExoForDrm: hasDrm && kotvIsAndroid(),
         enabled: KotvPlaybackFailover.enabledFromSetting(_prefPlayerFailover),
       );
+      // 独立播放窗口模式（桌面端）：解析已完成，交给子窗口起播；窗口不可用则回退内嵌。
+      if (_popupPlayer &&
+          !kIsWeb &&
+          (Platform.isWindows || Platform.isMacOS || Platform.isLinux)) {
+        await _stopInactiveBackends(_backend);
+        if (serial != _playAtSerial || !mounted) return;
+        final cached = playUrl.contains('/proxy/cached_m3u8');
+        final proxied = playUrl.contains('/proxy/play');
+        final popHeaders =
+            (headers.isNotEmpty && !cached && !proxied) ? headers : const <String, String>{};
+        setState(() {
+          _playUrl = '';
+          _playerVal = startPlayer;
+          _decodeMode = _prefDecodeMode;
+          _status = '独立窗口播放中';
+        });
+        _syncFullscreen();
+        final ok = await PlaybackWindow.play(PlaybackWindowArgs(
+          vodName: d.name,
+          title: ep.name,
+          epIdx: epIdx,
+          episodes: _eps.map((e) => e.name).toList(),
+          playUrl: playUrl,
+          headers: popHeaders,
+          decodeMode: _prefDecodeMode,
+          fit: _aspect.fit.name,
+          volume: _prefVolume,
+          rate: _prefSpeed,
+        ));
+        if (!ok) {
+          if (mounted) {
+            setState(() => _status = epLooksMagnet ? '磁力缓冲中…' : '加载中…');
+          }
+        } else {
+          return;
+        }
+      }
       Object? lastOpenError;
       var opened = false;
       for (var attempt = 0; attempt < 8; attempt++) {
@@ -1365,13 +1426,21 @@ class _DetailScreenState extends ConsumerState<DetailScreen> {
     return GestureDetector(
       behavior: HitTestBehavior.opaque,
       onTap: () {
-        if (_playUrl.isEmpty) return;
+        if (_playUrl.isEmpty) {
+          // 独立窗口模式下画面为空闲区：把播放窗口调到前台。
+          if (_popupPlayer && PlaybackWindow.open) {
+            unawaited(PlaybackWindow.focus());
+          }
+          return;
+        }
         unawaited(_playback.playOrPause());
         setState(() {});
       },
       onDoubleTap: interactive
           ? () {
-              if (_playUrl.isNotEmpty) {
+              if (_popupPlayer && PlaybackWindow.open) {
+                unawaited(PlaybackWindow.focus());
+              } else if (_playUrl.isNotEmpty) {
                 unawaited(_enterFullscreen());
               } else if (_eps.isNotEmpty) {
                 unawaited(_playAt(_epIdx >= 0 ? _epIdx : 0, fullscreen: true));

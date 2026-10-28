@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'util/kotv_io.dart';
 
+import 'package:desktop_multi_window/desktop_multi_window.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -9,6 +10,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 import 'package:window_manager/window_manager.dart';
 
 import 'desktop/mini_player_window.dart';
+import 'desktop/playback_window.dart';
 import 'api/kotv_engine_url.dart';
 import 'engine/engine_launcher.dart';
 import 'player/buffer_budget.dart';
@@ -98,6 +100,17 @@ Future<void> main() async {
     // Android 也要 init：用户可选 MPV（media_kit）；Web 用 HTML5，不初始化 media_kit。
     MediaKit.ensureInitialized();
     kotvRegisterFvp();
+    // 多窗口：独立播放窗口走自己的入口（不启动引擎 / 不配置主窗口）。
+    try {
+      final winCtrl = await WindowController.fromCurrentEngine();
+      final subArgs = PlaybackWindowArgs.tryFromWindowArguments(winCtrl.arguments);
+      if (subArgs != null) {
+        runApp(ProviderScope(child: PlaybackWindowApp(args: subArgs)));
+        return;
+      }
+    } catch (_) {
+      // 多窗口插件不可用时按主窗口继续。
+    }
   }
   unawaited(KotvBufferBudget.warm());
   final prefs = await SharedPreferences.getInstance();
@@ -174,6 +187,7 @@ class _KotvAppState extends ConsumerState<KotvApp> with WindowListener, WidgetsB
     super.initState();
     WidgetsBinding.instance.addObserver(this);
     MiniPlayerWindow.bindAndroidPipListener();
+    unawaited(PlaybackWindow.initHost());
     // 同步一次当前系统亮暗
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (!mounted) return;
@@ -242,6 +256,10 @@ class _KotvAppState extends ConsumerState<KotvApp> with WindowListener, WidgetsB
   void onWindowClose() async {
     _saveBoundsTimer?.cancel();
     await _persistWindowBounds();
+    // 先关独立播放窗口，再停页面内 libmpv，最后关引擎/销毁窗口。
+    try {
+      await PlaybackWindow.close();
+    } catch (_) {}
     // 先停页面内 libmpv，再关引擎/销毁窗口，避免 mpv core 与 FlutterEngine 竞态崩溃。
     try {
       await kotvRunQuitHooks();

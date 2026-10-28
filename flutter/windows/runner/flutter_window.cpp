@@ -5,6 +5,7 @@
 #include <flutter/standard_method_codec.h>
 
 #include "flutter/generated_plugin_registrant.h"
+#include "desktop_multi_window/desktop_multi_window_plugin.h"
 #include "kotv_iface_rx.h"
 
 FlutterWindow::FlutterWindow(const flutter::DartProject& project)
@@ -28,6 +29,13 @@ bool FlutterWindow::OnCreate() {
     return false;
   }
   RegisterPlugins(flutter_controller_->engine());
+  // 独立播放窗口：每个子窗口注册全部插件（media_kit / window_manager 等）。
+  DesktopMultiWindowSetWindowCreatedCallback([](void *controller) {
+    auto *flutter_view_controller =
+        reinterpret_cast<flutter::FlutterViewController *>(controller);
+    auto *registry = flutter_view_controller->engine();
+    RegisterPlugins(registry);
+  });
   RegisterHostChannel();
   SetChildContent(flutter_controller_->view()->GetNativeWindow());
 

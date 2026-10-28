@@ -763,6 +763,7 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
     final themeLabel = {'dark': '深色', 'light': '浅色', 'system': '跟随系统'}[theme] ?? theme;
     final mpvGpuNext = g('mpvGpuNext', 'false') == 'true';
     final mpvConfPreview = g('mpvConf').trim();
+    final popupOn = g('popupPlayer', kotvIsDesktop() ? 'true' : 'false') == 'true';
     // MPV conf：Android/桌面；gpu-next 仅 Android
     final showMpvOpts = kotvIsAndroid() || kotvIsDesktop();
 
@@ -856,6 +857,17 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
                             ('4:3', '4:3'),
                           ]),
                         ),
+                        if (kotvIsDesktop()) ...[
+                          KotvSettingsCell(
+                            label: '独立播放窗口',
+                            value: popupOn ? '开启' : '关闭',
+                            onTap: () => _set(
+                              'popupPlayer',
+                              popupOn ? 'false' : 'true',
+                              msg: popupOn ? '已改为内嵌播放' : '已改为独立窗口播放',
+                            ),
+                          ),
+                        ],
                         KotvSettingsCell(
                           label: '默认解析器',
                           value: parseName,
