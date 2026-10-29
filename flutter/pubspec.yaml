@@ -27,7 +27,6 @@ dependencies:
   file_selector: ^1.0.0
   # 播放中防休眠/屏保（手机+桌面）；media_kit_video 也传递依赖，这里升为直接依赖以便统一管控。
   wakelock_plus: 1.4.0
-  desktop_multi_window: ^0.3.1
 
 dev_dependencies:
   flutter_test:

@@ -1,7 +1,7 @@
 import 'dart:async';
 import 'dart:convert';
+import 'dart:io';
 
-import 'package:desktop_multi_window/desktop_multi_window.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
@@ -11,11 +11,13 @@ import '../player/kotv_playback.dart';
 import '../player/kotv_player_factory.dart';
 import '../player/mpv_opts.dart';
 import '../widgets/buffering_overlay.dart';
+import 'playback_ipc.dart';
 
-/// 独立播放窗口参数（跨窗口 JSON 传递）。
+/// 独立播放窗口参数（主进程 → 播放器进程 JSON 传递）。
 ///
-/// 主窗口解析出播放地址后，把画面相关参数交给独立窗口；独立窗口自行创建
-/// media_kit(MPV) 播放器渲染，主窗口保持浏览列表。
+/// 主窗口解析出播放地址后，把画面相关参数交给独立播放器进程；
+/// 播放器进程自行创建 media_kit(MPV) 播放器渲染，主窗口保持浏览列表。
+/// v5：播放器是独立进程（kotv-player.exe），通过本地 TCP IPC 通信。
 class PlaybackWindowArgs {
   const PlaybackWindowArgs({
     required this.vodName,
@@ -29,6 +31,18 @@ class PlaybackWindowArgs {
     this.volume,
     this.rate,
   });
+
+  /// 播放器进程启动占位参数（真正参数由主进程随后下发 play）。
+  factory PlaybackWindowArgs.placeholder() => const PlaybackWindowArgs(
+        vodName: '',
+        title: '',
+        epIdx: 0,
+        episodes: [],
+        playUrl: '',
+        headers: {},
+        decodeMode: 'auto',
+        fit: 'contain',
+      );
 
   final String vodName;
   final String title;
@@ -78,123 +92,146 @@ class PlaybackWindowArgs {
       return null;
     }
   }
-
-  /// 解析 [WindowController.fromCurrentEngine] 传来的窗口参数。
-  static PlaybackWindowArgs? tryFromWindowArguments(String json) {
-    if (json.isEmpty) return null;
-    try {
-      final m = Map<String, dynamic>.from(jsonDecode(json) as Map);
-      if (m['type'] != 'playback') return null;
-      return tryFromMap(m['args']);
-    } catch (_) {
-      return null;
-    }
-  }
 }
 
-/// 主窗口侧：管理独立播放窗口的创建 / 切集 / 关闭。
+/// 主窗口侧：管理独立播放器进程（kotv-player.exe）的启动 / 切集 / 关闭。
+///
+/// v5 起不再用 desktop_multi_window 共享进程子窗口——共享进程里播放器
+/// (media_kit/MPV) 一忙主窗口 Flutter UI 就冻结（点不动、关不掉、只能杀
+/// 进程）。独立进程彻底隔离：播放器崩/卡都不影响主窗口。
 class PlaybackWindow {
   PlaybackWindow._();
 
-  static const WindowMethodChannel _playCh =
-      WindowMethodChannel('kotv_playback', mode: ChannelMode.unidirectional);
-  static const WindowMethodChannel _hostCh =
-      WindowMethodChannel('kotv_playback_host', mode: ChannelMode.unidirectional);
+  static final PlaybackIpcServer _ipc = PlaybackIpcServer();
+  static Process? _proc;
 
-  static WindowController? _ctrl;
+  /// 独立播放器进程是否已启动。
+  static bool get open => _proc != null;
 
-  /// 独立播放窗口是否已打开。
-  static bool get open => _ctrl != null;
-
-  /// 独立窗口关闭时回调（主窗口 UI 复位）。
+  /// 播放器进程退出时回调（主窗口 UI 复位）。
   static VoidCallback? onPlaybackClosed;
 
-  /// 独立窗口播放出错回调。
+  /// 播放器播放出错回调。
   static void Function(String message)? onPlaybackError;
 
-  /// 独立窗口请求切换剧集（子窗口 → 主窗口，主窗口负责解析新集 URL）。
+  /// 播放器请求切换剧集（播放器 → 主窗口，主窗口负责解析新集 URL）。
   static void Function(int epIdx)? onSwitchEpisode;
 
-  /// 主窗口启动时注册一次：接收独立窗口上报。
+  /// 主窗口启动时注册一次：启动 IPC server，接收播放器上报。
   static Future<void> initHost() async {
     if (kIsWeb) return;
-    try {
-      await _hostCh.setMethodCallHandler((call) async {
-        switch (call.method) {
-          case 'closed':
-            _ctrl = null;
-            onPlaybackClosed?.call();
-            return 'ok';
-          case 'error':
-            onPlaybackError?.call('${call.arguments ?? ''}');
-            return 'ok';
-          case 'switchEpisode':
-            final idx = (call.arguments as num?)?.toInt();
-            if (idx != null) {
-              onSwitchEpisode?.call(idx);
-              return 'ok';
-            }
-            return 'bad_args';
-        }
-        return null;
-      });
-    } catch (e) {
-      debugPrint('playback window host init failed: $e');
-    }
+    _ipc.onClosed = () {
+      _proc = null;
+      onPlaybackClosed?.call();
+    };
+    _ipc.onError = (m) => onPlaybackError?.call(m);
+    _ipc.onSwitchEpisode = (idx) => onSwitchEpisode?.call(idx);
+    await _ipc.ensurePort();
   }
 
-  /// 请求独立窗口播放：窗口已存在则直接切集，不存在则创建。
-  /// 返回 false 表示独立窗口不可用（调用方回退内嵌播放）。
+  /// 播放器 exe 路径：主 exe 同目录的 kotv-player\kotv-player.exe。
+  static String _playerExePath() {
+    final exe = Platform.resolvedExecutable;
+    final dir = File(exe).parent.path;
+    return '$dir${Platform.pathSeparator}kotv-player'
+        '${Platform.pathSeparator}kotv-player.exe';
+  }
+
+  /// 请求播放器进程播放：进程已在则直接下发；否则先启动进程。
+  /// 返回 false 表示独立播放器不可用（调用方回退内嵌播放）。
   static Future<bool> play(PlaybackWindowArgs args) async {
     if (kIsWeb) return false;
-    final existing = _ctrl;
+    final existing = _proc;
     if (existing != null) {
+      final ok = await _ipc.sendToPlayer(PlaybackIpcCodec.typePlay, args.toJson());
+      if (ok) return true;
+      // 进程已退出：清理后重启。
+      _proc = null;
       try {
-        await _playCh.invokeMethod('play', args.toJson());
-        return true;
-      } catch (_) {
-        _ctrl = null;
-      }
+        existing.kill();
+      } catch (_) {}
+    }
+    return _startAndPlay(args);
+  }
+
+  static Future<bool> _startAndPlay(PlaybackWindowArgs args) async {
+    final parentPort = await _ipc.ensurePort();
+    final exe = _playerExePath();
+    if (!File(exe).existsSync()) {
+      debugPrint('playback player exe missing: $exe');
+      return false;
     }
     try {
-      final ctrl = await WindowController.create(
-        WindowConfiguration(
-          arguments: jsonEncode({'type': 'playback', 'args': args.toJson()}),
-        ),
+      final proc = await Process.start(
+        exe,
+        const [],
+        environment: {'KOTV_PARENT_PORT': '$parentPort'},
+        workingDirectory: File(exe).parent.path,
+        mode: ProcessStartMode.normal,
       );
-      _ctrl = ctrl;
-      await ctrl.show();
-      return true;
+      _proc = proc;
+      // 读播放器上报的端口行（纯 ASCII，避免 Windows 控制台编码问题）。
+      final lines = proc.stdout
+          .transform(utf8.decoder)
+          .transform(const LineSplitter());
+      final sub = lines.listen((line) {
+        if (line.startsWith('KOTV_PLAYER_PORT=')) {
+          final p = int.tryParse(line.substring('KOTV_PLAYER_PORT='.length));
+          if (p != null) _ipc.playerPort = p;
+        }
+      });
+      // 播放器进程退出：复位。
+      unawaited(proc.exitCode.then((_) {
+        sub.cancel();
+        if (identical(_proc, proc)) {
+          _proc = null;
+          onPlaybackClosed?.call();
+        }
+      }));
+      // 等播放器 ready（最多 15 秒）。
+      final deadline = DateTime.now().add(const Duration(seconds: 15));
+      while (_ipc.playerPort == null && DateTime.now().isBefore(deadline)) {
+        await Future.delayed(const Duration(milliseconds: 100));
+      }
+      if (_ipc.playerPort == null) {
+        _proc = null;
+        try {
+          proc.kill();
+        } catch (_) {}
+        debugPrint('playback player did not become ready');
+        return false;
+      }
+      return await _ipc.sendToPlayer(
+          PlaybackIpcCodec.typePlay, args.toJson());
     } catch (e) {
-      _ctrl = null;
-      debugPrint('playback window create failed: $e');
+      _proc = null;
+      debugPrint('playback player start failed: $e');
       return false;
     }
   }
 
-  /// 把独立播放窗口调到前台（点主窗口画面区域时）。
+  /// 把播放器窗口调到前台（点主窗口画面区域时）。
   static Future<void> focus() async {
-    if (kIsWeb || _ctrl == null) return;
-    try {
-      await _ctrl?.show();
-    } catch (_) {}
+    if (kIsWeb || _proc == null) return;
+    await _ipc.sendToPlayer(PlaybackIpcCodec.typeFocus);
   }
 
-  /// 请求关闭独立播放窗口（不等待结果；窗口关闭后由 host 回调复位）。
+  /// 请求关闭播放器进程（不等待结果；退出后由 IPC 回调复位）。
   static Future<void> close() async {
-    if (kIsWeb || _ctrl == null) return;
-    try {
-      await _playCh.invokeMethod('close');
-    } catch (_) {
-      _ctrl = null;
+    if (kIsWeb || _proc == null) return;
+    final ok = await _ipc.sendToPlayer(PlaybackIpcCodec.typeClose);
+    if (!ok) {
+      _proc = null;
+      onPlaybackClosed?.call();
     }
   }
 }
 
-/// 独立播放窗口的根组件（子窗口 runApp 用）。
+/// 独立播放器进程的根组件（kotv-player.exe 的 runApp 用）。
 class PlaybackWindowApp extends StatelessWidget {
-  const PlaybackWindowApp({super.key, required this.args});
+  const PlaybackWindowApp({super.key, required this.ipc, required this.args});
 
+  final PlaybackIpcClient ipc;
   final PlaybackWindowArgs args;
 
   @override
@@ -207,14 +244,15 @@ class PlaybackWindowApp extends StatelessWidget {
         scaffoldBackgroundColor: Colors.black,
         useMaterial3: true,
       ),
-      home: PlaybackWindowPage(args: args),
+      home: PlaybackWindowPage(ipc: ipc, args: args),
     );
   }
 }
 
 class PlaybackWindowPage extends StatefulWidget {
-  const PlaybackWindowPage({super.key, required this.args});
+  const PlaybackWindowPage({super.key, required this.ipc, required this.args});
 
+  final PlaybackIpcClient ipc;
   final PlaybackWindowArgs args;
 
   @override
@@ -229,7 +267,6 @@ class _PlaybackWindowPageState extends State<PlaybackWindowPage>
   bool _showChrome = true;
   Timer? _hideTimer;
   StreamSubscription<Duration>? _posSub;
-  StreamSubscription<void>? _winChangeSub;
   Duration _pos = Duration.zero;
   bool _busy = false;
   bool _epPanel = false;
@@ -247,6 +284,13 @@ class _PlaybackWindowPageState extends State<PlaybackWindowPage>
   void initState() {
     super.initState();
     _initWindow();
+    // 接收主进程指令（独立进程内安全地使用 window_manager 管理本窗口）。
+    widget.ipc.onPlay = (m) {
+      final a = PlaybackWindowArgs.tryFromMap(m);
+      if (a != null) unawaited(_open(a));
+    };
+    widget.ipc.onClose = () => unawaited(_close());
+    widget.ipc.onFocus = () => unawaited(_focusSelf());
     final mk = MediaKitPlayback(
       kotvCreateMpvPlayer(),
       opts: KotvMpvOpts(decodeMode: _args.decodeMode),
@@ -257,17 +301,14 @@ class _PlaybackWindowPageState extends State<PlaybackWindowPage>
       if (d.inSeconds == _pos.inSeconds) return;
       setState(() => _pos = d);
     });
-    const ch = WindowMethodChannel('kotv_playback', mode: ChannelMode.unidirectional);
-    unawaited(ch.setMethodCallHandler(_onPlayCall));
-    // 兜底：窗口被系统直接关闭（窗口列表里消失）时也复位主窗口。
-    _winChangeSub = onWindowsChanged.listen((_) {
-      unawaited(_checkAlive());
-    });
-    unawaited(_open(_args));
+    // 等待主进程下发真正的播放参数。
+    if (_args.playUrl.isNotEmpty) {
+      unawaited(_open(_args));
+    }
   }
 
-  /// 子窗口里 window_manager 只用于「本窗口」的显示层 + 拦截系统关闭；
-  /// 绝不调用 destroy()（PostQuitMessage(0) 打在主消息循环上会连主窗口一起退出）。
+  /// 播放器进程内用 window_manager 常规管理本窗口——独立进程里
+  /// 关闭/center 都只影响本进程，不存在共享 RunLoop 连退主窗口的问题。
   Future<void> _initWindow() async {
     if (kIsWeb) return;
     try {
@@ -276,23 +317,18 @@ class _PlaybackWindowPageState extends State<PlaybackWindowPage>
           await windowManager.ensureInitialized();
           await windowManager.setTitle('KO影视');
           await windowManager.setMinimumSize(const Size(420, 280));
-          // 子窗口默认创建在 (10,10)；不能再 center()——实测 center() 会把
-          // 800×600 的窗口叠到主窗口正中央，大面积遮挡主界面，造成
-          // “弹出后主界面无法操作”。Windows 走原生通道把窗口放到屏幕
-          // 右侧中部；其他平台（未注册原生通道）回退 center()。
+          // 放到屏幕右侧中部，不遮挡主界面（独立进程内安全）。
           try {
-            await const MethodChannel('kotv_playback_native')
-                .invokeMethod('moveToDefault');
+            await windowManager.setAlignment(Alignment.centerRight);
           } catch (_) {
             try {
-              await windowManager.center();
+              await windowManager.setPosition(const Offset(200, 80));
             } catch (_) {}
           }
-          // 拦截系统标题栏关闭（×）：WM_CLOSE 到 Flutter 引擎会触发全局
-          // RunLoop 的 PostQuitMessage，把主窗口一起退出。拦截后走 Dart
-          // onWindowClose → destroySelf（原生 DestroyWindow，绕过 WM_CLOSE）。
+          // 拦截系统标题栏关闭：先上报主进程，再销毁本进程窗口。
           await windowManager.setPreventClose(true);
           windowManager.addListener(this);
+          await windowManager.show();
         } catch (e) {
           debugPrint('playback window init failed: $e');
         }
@@ -302,33 +338,12 @@ class _PlaybackWindowPageState extends State<PlaybackWindowPage>
     }
   }
 
-  Future<void> _checkAlive() async {
+  Future<void> _focusSelf() async {
+    if (kIsWeb) return;
     try {
-      final me = await WindowController.fromCurrentEngine();
-      final all = await WindowController.getAll();
-      final alive = all.any((w) => w.windowId == me.windowId);
-      if (!alive) {
-        // 本窗口已被系统关闭：通知主窗口并释放播放器。
-        await _notifyClosed();
-        await _disposePlayback();
-      }
+      await windowManager.show();
+      await windowManager.focus();
     } catch (_) {}
-  }
-
-  Future<dynamic> _onPlayCall(MethodCall call) async {
-    switch (call.method) {
-      case 'play':
-        final a = PlaybackWindowArgs.tryFromMap(call.arguments);
-        if (a != null) {
-          unawaited(_open(a));
-          return 'ok';
-        }
-        return 'bad_args';
-      case 'close':
-        unawaited(_close());
-        return 'ok';
-    }
-    return null;
   }
 
   Future<void> _open(PlaybackWindowArgs args) async {
@@ -373,19 +388,11 @@ class _PlaybackWindowPageState extends State<PlaybackWindowPage>
   }
 
   Future<void> _notifyClosed() async {
-    if (kIsWeb) return;
-    try {
-      await const WindowMethodChannel('kotv_playback_host', mode: ChannelMode.unidirectional)
-          .invokeMethod('closed');
-    } catch (_) {}
+    await widget.ipc.notify(PlaybackIpcCodec.typeClosed);
   }
 
   Future<void> _notifyError(String message) async {
-    if (kIsWeb) return;
-    try {
-      await const WindowMethodChannel('kotv_playback_host', mode: ChannelMode.unidirectional)
-          .invokeMethod('error', message);
-    } catch (_) {}
+    await widget.ipc.notify(PlaybackIpcCodec.typeError, {'message': message});
   }
 
   /// 请求主窗口解析并切换到第 [idx] 集（主窗口走 popup 分支回传新 playUrl）。
@@ -404,26 +411,18 @@ class _PlaybackWindowPageState extends State<PlaybackWindowPage>
     _switchTimeout = Timer(const Duration(seconds: 10), () {
       if (mounted && _status == '切换中…') setState(() => _status = '');
     });
-    if (!kIsWeb) {
-      try {
-        await const WindowMethodChannel('kotv_playback_host', mode: ChannelMode.unidirectional)
-            .invokeMethod('switchEpisode', idx);
-      } catch (_) {
-        if (mounted) setState(() => _status = '');
-      }
-    }
+    await widget.ipc.notify(
+        PlaybackIpcCodec.typeSwitchEpisode, {'epIdx': idx});
   }
 
   Future<void> _close() async {
-    // 先通知主窗口复位，再停播放，最后原生销毁本窗口（绕过 WM_CLOSE）。
+    // 先通知主窗口复位，再停播放，最后销毁本窗口（独立进程，安全）。
     await _notifyClosed();
     await _disposePlayback();
     if (kIsWeb) return;
     try {
-      await const MethodChannel('kotv_playback_native')
-          .invokeMethod('destroySelf');
+      await windowManager.destroy();
     } catch (_) {
-      // Linux 等未注册原生通道的环境：退回 window_manager.close()。
       try {
         await windowManager.close();
       } catch (_) {}
@@ -457,7 +456,6 @@ class _PlaybackWindowPageState extends State<PlaybackWindowPage>
     _hideTimer?.cancel();
     _switchTimeout?.cancel();
     _posSub?.cancel();
-    _winChangeSub?.cancel();
     if (!kIsWeb) {
       try {
         windowManager.removeListener(this);

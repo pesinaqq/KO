@@ -67,7 +67,36 @@ flutter pub get
 kotv_ensure_mdk_windows_sdk
 flutter build windows --release
 
+# v5 独立播放器进程：构建 kotv-player.exe（独立 target，自包含 dll+data）。
+# 播放器与主窗口不同进程，media_kit/MPV 再忙也不冻结主窗口 UI。
+echo "==> flutter build windows --release (player target)"
+flutter build windows --release --target=lib/playback_main.dart -o build/playback
+
 [[ -f "$RELEASE_DIR/kotv.exe" ]] || { echo "missing $RELEASE_DIR/kotv.exe" >&2; exit 1; }
+
+PLAYER_SRC=""
+for cand in \
+  "build/playback/kotv.exe" \
+  "build/playback/x64/runner/Release/kotv.exe" \
+  "build/playback/Release/kotv.exe"; do
+  if [[ -f "$cand" ]]; then PLAYER_SRC="${cand%/kotv.exe}"; break; fi
+done
+if [[ -z "$PLAYER_SRC" ]]; then
+  echo "!! player target build output not found under build/playback" >&2
+  find build/playback -maxdepth 4 -name "kotv.exe" 2>/dev/null >&2 || true
+  exit 1
+fi
+PLAYER_DIR="$RELEASE_DIR/kotv-player"
+rm -rf "$PLAYER_DIR"
+mkdir -p "$PLAYER_DIR"
+cp -f "$PLAYER_SRC/kotv.exe" "$PLAYER_DIR/kotv-player.exe"
+# 拷贝播放器自带的全部 dll + data（自包含，不依赖 Release 根目录的 dll/runtime）。
+cp -rf "$PLAYER_SRC"/data "$PLAYER_DIR/" 2>/dev/null || true
+for f in "$PLAYER_SRC"/*.dll; do
+  [[ -f "$f" ]] && cp -f "$f" "$PLAYER_DIR/"
+done
+[[ -f "$PLAYER_DIR/kotv-player.exe" ]] || { echo "missing $PLAYER_DIR/kotv-player.exe" >&2; exit 1; }
+echo "==> player bundle: $(du -sh "$PLAYER_DIR" | cut -f1)"
 cp -f "$ENGINE_OUT" "$RELEASE_DIR/kotv-engine.exe"
 # 清掉可能误进 assets 的无后缀文件（LiteralPath）
 pwsh -NoProfile -Command "

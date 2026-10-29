@@ -1,7 +1,6 @@
 import 'dart:async';
 import 'util/kotv_io.dart';
 
-import 'package:desktop_multi_window/desktop_multi_window.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -100,17 +99,8 @@ Future<void> main() async {
     // Android 也要 init：用户可选 MPV（media_kit）；Web 用 HTML5，不初始化 media_kit。
     MediaKit.ensureInitialized();
     kotvRegisterFvp();
-    // 多窗口：独立播放窗口走自己的入口（不启动引擎 / 不配置主窗口）。
-    try {
-      final winCtrl = await WindowController.fromCurrentEngine();
-      final subArgs = PlaybackWindowArgs.tryFromWindowArguments(winCtrl.arguments);
-      if (subArgs != null) {
-        runApp(ProviderScope(child: PlaybackWindowApp(args: subArgs)));
-        return;
-      }
-    } catch (_) {
-      // 多窗口插件不可用时按主窗口继续。
-    }
+    // v5：独立播放器改为独立进程（kotv-player.exe，见 lib/playback_main.dart），
+    // 经本地 TCP IPC 通信，不再使用 desktop_multi_window 共享进程子窗口。
   }
   unawaited(KotvBufferBudget.warm());
   final prefs = await SharedPreferences.getInstance();
