@@ -121,7 +121,14 @@ Future<void> main() async {
       title: 'KO影视',
     );
     await windowManager.waitUntilReadyToShow(opts, () async {
-      if (savedX != null && savedY != null) {
+      // 位置有效性校验：坏值（-32000 哨兵/越界）直接忽略，交给 center。
+      final posOk = savedX != null &&
+          savedY != null &&
+          savedX >= -2000 &&
+          savedY >= -2000 &&
+          savedX <= 10000 &&
+          savedY <= 10000;
+      if (posOk) {
         try {
           await windowManager.setPosition(Offset(savedX, savedY));
         } catch (_) {}
@@ -222,10 +229,22 @@ class _KotvAppState extends ConsumerState<KotvApp> with WindowListener, WidgetsB
       final size = await windowManager.getSize();
       final pos = await windowManager.getPosition();
       final prefs = await SharedPreferences.getInstance();
-      await prefs.setDouble('window_w', size.width);
-      await prefs.setDouble('window_h', size.height);
-      await prefs.setDouble('window_x', pos.dx);
-      await prefs.setDouble('window_y', pos.dy);
+      final w = size.width;
+      final h = size.height;
+      // 最小化时 getSize 可能返回 0 或极小值，同样跳过避免下次以小窗启动。
+      if (w > 0 && h > 0 && w <= 10000 && h <= 10000) {
+        await prefs.setDouble('window_w', w);
+        await prefs.setDouble('window_h', h);
+      }
+      // 窗口最小化/隐藏时 Win32 会把位置挪到 (-32000,-32000) 哨兵坐标，
+      // 若直接保存，下次启动 setPosition 会把主窗口放到屏幕外（"打开不显示"）。
+      // 只保存合理范围内的位置；异常坐标跳过，保留上次有效值。
+      final dx = pos.dx;
+      final dy = pos.dy;
+      if (dx >= -2000 && dy >= -2000 && dx <= 10000 && dy <= 10000) {
+        await prefs.setDouble('window_x', dx);
+        await prefs.setDouble('window_y', dy);
+      }
     } catch (_) {}
   }
 
