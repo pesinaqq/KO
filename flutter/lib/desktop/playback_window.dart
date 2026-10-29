@@ -276,7 +276,18 @@ class _PlaybackWindowPageState extends State<PlaybackWindowPage>
           await windowManager.ensureInitialized();
           await windowManager.setTitle('KO影视');
           await windowManager.setMinimumSize(const Size(420, 280));
-          await windowManager.center();
+          // 子窗口默认创建在 (10,10)；不能再 center()——实测 center() 会把
+          // 800×600 的窗口叠到主窗口正中央，大面积遮挡主界面，造成
+          // “弹出后主界面无法操作”。Windows 走原生通道把窗口放到屏幕
+          // 右侧中部；其他平台（未注册原生通道）回退 center()。
+          try {
+            await const MethodChannel('kotv_playback_native')
+                .invokeMethod('moveToDefault');
+          } catch (_) {
+            try {
+              await windowManager.center();
+            } catch (_) {}
+          }
           // 拦截系统标题栏关闭（×）：WM_CLOSE 到 Flutter 引擎会触发全局
           // RunLoop 的 PostQuitMessage，把主窗口一起退出。拦截后走 Dart
           // onWindowClose → destroySelf（原生 DestroyWindow，绕过 WM_CLOSE）。

@@ -52,13 +52,30 @@ bool FlutterWindow::OnCreate() {
     channel->SetMethodCallHandler(
         [flutter_view_controller](const flutter::MethodCall<flutter::EncodableValue> &call,
            std::unique_ptr<flutter::MethodResult<flutter::EncodableValue>> result) {
+          HWND hwnd = flutter_view_controller->view()->GetNativeWindow();
+          HWND root = hwnd ? ::GetAncestor(hwnd, GA_ROOT) : nullptr;
           if (call.method_name() == "destroySelf") {
-            HWND hwnd = flutter_view_controller->view()->GetNativeWindow();
-            if (hwnd) {
-              HWND root = ::GetAncestor(hwnd, GA_ROOT);
-              if (root) {
-                ::DestroyWindow(root);
-              }
+            if (root) {
+              // 绕过 WM_CLOSE 直接销毁子窗口，避免 Flutter 全局 RunLoop
+              // PostQuitMessage 把主窗口一起退出。
+              ::DestroyWindow(root);
+            }
+            result->Success(flutter::EncodableValue(true));
+          } else if (call.method_name() == "moveToDefault") {
+            // 把子窗口放到屏幕右侧中部，避免叠在主窗口中央遮挡主界面。
+            if (root) {
+              RECT rc;
+              ::GetWindowRect(root, &rc);
+              int w = rc.right - rc.left;
+              int h = rc.bottom - rc.top;
+              int sw = ::GetSystemMetrics(SM_CXSCREEN);
+              int sh = ::GetSystemMetrics(SM_CYSCREEN);
+              int x = sw - w - 60;
+              int y = (sh - h) / 2;
+              if (x < 0) x = 0;
+              if (y < 0) y = 0;
+              ::SetWindowPos(root, nullptr, x, y, 0, 0,
+                             SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
             }
             result->Success(flutter::EncodableValue(true));
           } else {
