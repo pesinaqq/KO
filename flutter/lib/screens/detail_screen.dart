@@ -654,11 +654,10 @@ class _DetailScreenState extends ConsumerState<DetailScreen> {
         _prefPlayerVal = _playerVal;
         final failoverMode = '${settings['playerFailover'] ?? 'auto'}'.trim().toLowerCase();
         _prefPlayerFailover = (failoverMode == 'off' || failoverMode == 'false') ? 'off' : 'auto';
-        // 桌面端独立播放窗口：设置未显式配置时默认开启（仅桌面可用）。
+        // 桌面端独立播放窗口：v8.2 起桌面端强制独立窗口（不需要内置播放），
+        // 设置项 popupPlayer 仅在移动端有意义。
         final popupRaw = '${settings['popupPlayer'] ?? ''}'.trim();
-        _popupPlayer = popupRaw.isEmpty
-            ? kotvIsDesktop()
-            : popupRaw.toLowerCase() == 'true';
+        _popupPlayer = kotvIsDesktop() || popupRaw.toLowerCase() == 'true';
         // 绝不在进详情时创建 Player：libmpv 初始化 + VideoController 附着会卡死 UI / 手机闪退。
         // 音量/倍速等偏好先记下，真正 [_playAt] open 后再套。
         _prefSpeed = double.tryParse('${settings['playerSpeed'] ?? ''}');
@@ -1025,9 +1024,9 @@ class _DetailScreenState extends ConsumerState<DetailScreen> {
         lockExoForDrm: hasDrm && kotvIsAndroid(),
         enabled: KotvPlaybackFailover.enabledFromSetting(_prefPlayerFailover),
       );
-      // 独立播放窗口模式（桌面端）：解析已完成，交给子窗口起播；窗口不可用则回退内嵌。
-      if (_popupPlayer &&
-          !kIsWeb &&
+      // 独立播放窗口模式（桌面端）：解析已完成，交给独立播放器起播。
+      // v8.2：桌面端一律独立窗口（不需要内置播放），不再回退内嵌 MPV。
+      if (!kIsWeb &&
           (Platform.isWindows || Platform.isMacOS || Platform.isLinux)) {
         await _stopInactiveBackends(_backend);
         if (serial != _playAtSerial || !mounted) return;
@@ -1498,12 +1497,14 @@ class _DetailScreenState extends ConsumerState<DetailScreen> {
       },
       onDoubleTap: interactive
           ? () {
-              if (_popupPlayer && PlaybackWindow.open) {
+              // v8.2：不需要内置播放——画面区双击在独立窗口模式下始终聚焦播放窗口；
+              // 未播放则弹独立窗口播放，不再进入内嵌全屏。
+              if (PlaybackWindow.open) {
                 unawaited(PlaybackWindow.focus());
               } else if (_playUrl.isNotEmpty) {
                 unawaited(_enterFullscreen());
               } else if (_eps.isNotEmpty) {
-                unawaited(_playAt(_epIdx >= 0 ? _epIdx : 0, fullscreen: true));
+                unawaited(_playAt(_epIdx >= 0 ? _epIdx : 0));
               }
             }
           : null,
