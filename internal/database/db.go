@@ -243,13 +243,20 @@ func (db *DB) DeleteConfigByURL(url string, typ int64) error {
 }
 
 // SetConfigHome 按 url+type 更新记住的首页站点 key。
+// 无匹配行时（配置尚未入库）视为失败并返回错误，调用方可感知持久化未生效。
 func (db *DB) SetConfigHome(url string, typ int64, home string) error {
 	now := time.Now().UnixMilli()
-	_, err := db.conn.Exec(
+	res, err := db.conn.Exec(
 		`UPDATE config SET home=?, time=? WHERE url=? AND type=?`,
 		nullStr(home), now, url, typ,
 	)
-	return err
+	if err != nil {
+		return err
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return fmt.Errorf("config row not found: url=%s type=%d", url, typ)
+	}
+	return nil
 }
 
 // SetConfigName 更新配置显示名（空字符串表示清除自定义名，列表回落为完整地址）。

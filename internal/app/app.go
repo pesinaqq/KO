@@ -196,21 +196,20 @@ func (a *App) bootstrapSession(sess *clientsession.Session) {
 	sess.Bootstrapped = true
 	src, homeKey := clientsession.LoadSource(sess.ClientID)
 	src = strings.TrimSpace(src)
-	if src == "" {
-		return
-	}
 	cur := strings.TrimSpace(sess.Source)
-	if cur != "" && cur == src && sess.Ready {
-		return
+	// 源恢复：仅当持久化源非空、且当前会话源未就绪/不一致时才重载，
+	// 避免重复拉取。首页站点恢复与之解耦：即使源已就绪，也要把上次
+	// 选择的 home 站点套回去（v7 修复"换源后重开回第一条"）。
+	if src != "" && (cur == "" || cur != src || !sess.Ready) {
+		if err := sess.Cfg.LoadFromSource(src); err != nil {
+			sess.Ready = false
+			sess.ErrMsg = err.Error()
+			return
+		}
+		sess.Source = src
+		sess.Ready = true
+		sess.ErrMsg = ""
 	}
-	if err := sess.Cfg.LoadFromSource(src); err != nil {
-		sess.Ready = false
-		sess.ErrMsg = err.Error()
-		return
-	}
-	sess.Source = src
-	sess.Ready = true
-	sess.ErrMsg = ""
 	if homeKey != "" {
 		if site := sess.Cfg.GetSite(homeKey); site != nil {
 			sess.Cfg.SetHome(*site)

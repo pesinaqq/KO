@@ -167,10 +167,15 @@ class PlaybackWindow {
     if (existing != null) {
       final ok = await _ipc.sendToPlayer(PlaybackIpcCodec.typePlay, args.toJson());
       if (ok) return true;
-      // 进程已退出：清理后重启。
+      // v7：播放器忙/卡导致 IPC 下发失败时，先强制结束旧进程并等它真正
+      // 退出，再启动新进程。旧做法直接重启，可能残留一个空转/卡死的
+      // 播放器窗口（主窗口回退内嵌后它就成了"卡死不播放"的假象）。
+      debugPrint('playback ipc play failed; killing stale player before restart');
       _proc = null;
+      _ipc.playerPort = null;
       try {
         existing.kill();
+        await existing.exitCode.timeout(const Duration(seconds: 2));
       } catch (_) {}
     }
     return _startAndPlay(args);
@@ -223,8 +228,21 @@ class PlaybackWindow {
         debugPrint('playback player did not become ready');
         return false;
       }
-      return await _ipc.sendToPlayer(
+      final ok = await _ipc.sendToPlayer(
           PlaybackIpcCodec.typePlay, args.toJson());
+      if (!ok) {
+        // v7：刚启动的播放器也下发失败时，必须把进程与状态一并清掉。
+        // 旧做法只 return false，残留一个空转的播放器窗口（黑屏/加载态），
+        // 主窗口回退内嵌后它就成了"卡死不播放"的假象。
+        _proc = null;
+        _ipc.playerPort = null;
+        try {
+          proc.kill();
+          await proc.exitCode.timeout(const Duration(seconds: 2));
+        } catch (_) {}
+        debugPrint('playback player send play failed after start');
+      }
+      return ok;
     } catch (e) {
       _proc = null;
       debugPrint('playback player start failed: $e');
@@ -241,9 +259,16 @@ class PlaybackWindow {
   /// 请求关闭播放器进程（不等待结果；退出后由 IPC 回调复位）。
   static Future<void> close() async {
     if (kIsWeb || _proc == null) return;
+    final p = _proc;
     final ok = await _ipc.sendToPlayer(PlaybackIpcCodec.typeClose);
-    if (!ok) {
+    if (!ok && p != null) {
+      // v7：close 下发失败说明播放器可能卡死，强制结束，避免窗口残留。
       _proc = null;
+      _ipc.playerPort = null;
+      try {
+        p.kill();
+        await p.exitCode.timeout(const Duration(seconds: 2));
+      } catch (_) {}
       onPlaybackClosed?.call();
     }
   }
