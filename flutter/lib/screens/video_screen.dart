@@ -515,7 +515,6 @@ class _VideoScreenState extends ConsumerState<VideoScreen> {
             categories: [for (final t in _types) (id: t.id, name: t.name)],
             selectedTid: _tid,
             onCategory: (tid) => _switchCategory(tid),
-            onLive: () => goKotvPage(ref, KotvPage.live),
           ),
         if (ready && !onHome && _filters.isNotEmpty) _buildFilters(),
         if (ready && _statusMsg != null)
@@ -886,16 +885,6 @@ class _VideoScreenState extends ConsumerState<VideoScreen> {
           h: cardH,
           onTap: () => goKotvPage(ref, KotvPage.history),
         ),
-        if (!bottomNav)
-          feature(
-            title: '直播',
-            subtitle: '央视、卫视一网打尽',
-            start: const Color(0xF2B44388),
-            end: const Color(0xF27840A7),
-            icon: Icons.videocam_outlined,
-            h: cardH,
-            onTap: () => goKotvPage(ref, KotvPage.live),
-          ),
       ];
       return Column(
         children: [
@@ -1011,15 +1000,6 @@ class _VideoScreenState extends ConsumerState<VideoScreen> {
                     onTap: () => goKotvPage(ref, KotvPage.history),
                   )),
                   SizedBox(width: gap),
-                  cell(feature(
-                    title: '直播',
-                    subtitle: '央视、卫视一网打尽',
-                    start: const Color(0xF2B44388),
-                    end: const Color(0xF27840A7),
-                    icon: Icons.videocam_outlined,
-                    h: cardH,
-                    onTap: () => goKotvPage(ref, KotvPage.live),
-                  )),
                 ],
               ),
             ),

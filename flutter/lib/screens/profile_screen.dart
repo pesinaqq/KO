@@ -321,7 +321,6 @@ class _ProfileScreenState extends ConsumerState<ProfileScreen> {
                     for (final e in [
                       ('历史记录', KotvPage.history),
                       ('我的收藏', KotvPage.collect),
-                      if (!bottomNav) ('直播', KotvPage.live),
                       ('设置', KotvPage.settings),
                       ('检测爬虫', KotvPage.settings),
                     ])
@@ -351,7 +350,6 @@ class _ProfileScreenState extends ConsumerState<ProfileScreen> {
                       for (final e in [
                         ('历史记录', KotvPage.history),
                         ('我的收藏', KotvPage.collect),
-                        ('直播', KotvPage.live),
                         ('设置', KotvPage.settings),
                       ]) ...[
                         Expanded(child: AppPill(label: e.$1, height: 46, onTap: () => goKotvPage(ref, e.$2))),

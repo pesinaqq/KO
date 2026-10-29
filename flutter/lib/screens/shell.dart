@@ -7,7 +7,6 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../providers.dart';
 import '../player/play_headers.dart';
-import '../remote/local_collect.dart';
 import '../remote/postmsg_host.dart';
 import '../remote/remote_bridge.dart';
 import '../theme/layout_scale.dart';
@@ -17,7 +16,6 @@ import '../widgets/chrome.dart';
 import 'collect_screen.dart';
 import 'detail_screen.dart';
 import 'history_screen.dart';
-import 'live_screen.dart';
 import 'profile_screen.dart';
 import 'search_screen.dart';
 import 'settings_screen.dart';
@@ -104,17 +102,17 @@ class _AppShellState extends ConsumerState<AppShell> {
   int _bottomIndex(KotvPage page) {
     return switch (page) {
       KotvPage.video => 0,
+      KotvPage.search => 1,
+      KotvPage.profile || KotvPage.history || KotvPage.collect || KotvPage.settings => 2,
+      // 直播入口已移除，不可达；保留枚举成员以满足穷尽 switch。
       KotvPage.live => 1,
-      KotvPage.search => 2,
-      KotvPage.profile || KotvPage.history || KotvPage.collect || KotvPage.settings => 3,
     };
   }
 
   void _onBottomTap(int i) {
     final next = switch (i) {
       0 => KotvPage.video,
-      1 => KotvPage.live,
-      2 => KotvPage.search,
+      1 => KotvPage.search,
       _ => KotvPage.profile,
     };
     // 底栏切主 Tab：清空返回栈，避免从深层页「返回」跳到已离开的 Tab
@@ -127,10 +125,11 @@ class _AppShellState extends ConsumerState<AppShell> {
       KotvPage.video => const VideoScreen(),
       KotvPage.search => const SearchScreen(),
       KotvPage.history => const HistoryScreen(),
-      KotvPage.live => const LiveScreen(),
       KotvPage.settings => const SettingsScreen(),
       KotvPage.profile => const ProfileScreen(),
       KotvPage.collect => const CollectScreen(),
+      // 直播入口已移除，不可达。
+      KotvPage.live => const ProfileScreen(),
     };
   }
 
@@ -347,11 +346,6 @@ class _AppShellState extends ConsumerState<AppShell> {
                           icon: Icon(Icons.home_outlined, color: p.muted),
                           selectedIcon: const Icon(Icons.home_rounded, color: Colors.white),
                           label: '首页',
-                        ),
-                        NavigationDestination(
-                          icon: Icon(Icons.live_tv_outlined, color: p.muted),
-                          selectedIcon: const Icon(Icons.live_tv, color: Colors.white),
-                          label: '直播',
                         ),
                         NavigationDestination(
                           icon: Icon(Icons.search_rounded, color: p.muted),

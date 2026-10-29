@@ -1057,22 +1057,17 @@ class _DetailScreenState extends ConsumerState<DetailScreen> {
           endingSec: _endingSec,
         ));
         if (!ok) {
-          if (_popupClosed) {
-            // 用户已主动关闭独立播放窗口：不转内置，直接停止。
-            if (mounted) {
-              setState(() {
-                _playUrl = '';
-                _status = '已停止';
-              });
-            }
-            return;
-          }
+          // v8.2：不需要内置播放——独立播放器不可用/失败不再回退内嵌播放，
+          // 直接停止并提示（播放器崩溃等异常时同样如此）。
           if (mounted) {
-            setState(() => _status = epLooksMagnet ? '磁力缓冲中…' : '加载中…');
+            setState(() {
+              _playUrl = '';
+              _status = _popupClosed ? '已停止' : '独立播放器不可用，播放失败';
+            });
           }
-        } else {
           return;
         }
+        return;
       }
       Object? lastOpenError;
       var opened = false;

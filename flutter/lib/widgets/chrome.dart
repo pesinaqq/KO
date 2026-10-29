@@ -751,7 +751,6 @@ class CategoryNavBar extends StatelessWidget {
     required this.categories,
     required this.selectedTid,
     required this.onCategory,
-    required this.onLive,
   });
 
   final String homeLabel;
@@ -760,14 +759,12 @@ class CategoryNavBar extends StatelessWidget {
   final List<({String id, String name})> categories;
   final String? selectedTid;
   final void Function(String tid) onCategory;
-  final VoidCallback onLive;
 
   @override
   Widget build(BuildContext context) {
     final s = LayoutScale.of(context);
     final p = KotvPalette.of(context);
     final compact = KotvLayout.isCompact(context);
-    final bottomNav = KotvLayout.useBottomNav(context);
     // 固定高度匹配 NavPill(36)，避免 scale 把栏压矮后胶囊溢出
     return Container(
       height: compact ? 40.0 : 48.0,
@@ -791,11 +788,6 @@ class CategoryNavBar extends StatelessWidget {
               },
             ),
           ),
-          // 竖屏底栏已有「直播」
-          if (!bottomNav) ...[
-            SizedBox(width: 8 * s),
-            NavPill(label: '直播', onTap: onLive),
-          ],
         ],
       ),
     );
