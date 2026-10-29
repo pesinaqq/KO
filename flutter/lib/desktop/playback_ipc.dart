@@ -23,6 +23,11 @@ class PlaybackIpcCodec {
   static const String typeError = 'error';
   static const String typeSwitchEpisode = 'switchEpisode';
 
+  // v6：播放器进程请求主窗口执行的动作/状态同步。
+  static const String typeParse = 'parse';
+  static const String typeRefresh = 'refresh';
+  static const String typeOffsets = 'offsets';
+
   static String encode(Object? body) => jsonEncode(body);
 }
 
@@ -42,6 +47,15 @@ class PlaybackIpcServer {
 
   /// 播放器请求切换剧集（主窗口负责解析新 URL 后回发 play）。
   void Function(int epIdx)? onSwitchEpisode;
+
+  /// 播放器请求主窗口重新解析（换解析器后重播当前集）。
+  void Function()? onParse;
+
+  /// 播放器请求主窗口刷新当前集。
+  void Function()? onRefresh;
+
+  /// 播放器内调整了片头/片尾偏移，请主窗口同步持久化。
+  void Function(int openingSec, int endingSec)? onOffsets;
 
   /// 惰性启动主进程侧 server；返回监听端口。
   Future<int> ensurePort() async {
@@ -79,6 +93,17 @@ class PlaybackIpcServer {
           case PlaybackIpcCodec.typeSwitchEpisode:
             final idx = (body['epIdx'] as num?)?.toInt();
             if (idx != null) onSwitchEpisode?.call(idx);
+            break;
+          case PlaybackIpcCodec.typeParse:
+            onParse?.call();
+            break;
+          case PlaybackIpcCodec.typeRefresh:
+            onRefresh?.call();
+            break;
+          case PlaybackIpcCodec.typeOffsets:
+            final open = (body['opening'] as num?)?.toInt() ?? 0;
+            final end = (body['ending'] as num?)?.toInt() ?? 0;
+            onOffsets?.call(open, end);
             break;
           default:
             reply = null;

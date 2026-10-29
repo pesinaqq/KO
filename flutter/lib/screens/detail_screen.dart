@@ -342,6 +342,29 @@ class _DetailScreenState extends ConsumerState<DetailScreen> {
       if (idx < 0 || idx >= _eps.length) return;
       unawaited(_playAt(idx));
     };
+    // 独立窗口内点"解析"：主窗口选解析器后重播当前集（回发 play）。
+    PlaybackWindow.onParse = () {
+      if (!mounted) return;
+      unawaited(_pickParse());
+    };
+    // 独立窗口内点"刷新"：主窗口重新解析当前集。
+    PlaybackWindow.onRefresh = () {
+      if (!mounted) return;
+      if (_epIdx >= 0) unawaited(_playAt(_epIdx));
+    };
+    // 独立窗口内调整片头/片尾偏移：主窗口同步状态并持久化，
+    // 后续切集/重开窗口时作为初始值下发。
+    PlaybackWindow.onOffsets = (open, end) {
+      if (!mounted) return;
+      setState(() {
+        _openingSec = open.clamp(0, 3600);
+        _endingSec = end.clamp(0, 3600);
+      });
+      final id = _detail?.id.isNotEmpty == true ? _detail!.id : widget.id;
+      final site =
+          _detail?.site.isNotEmpty == true ? _detail!.site : widget.site;
+      unawaited(LocalPlayOffsets.set(id, site, _openingSec, _endingSec));
+    };
     _load();
   }
 
@@ -1006,6 +1029,8 @@ class _DetailScreenState extends ConsumerState<DetailScreen> {
           fit: _aspect.fit.name,
           volume: _prefVolume,
           rate: _prefSpeed,
+          openingSec: _openingSec,
+          endingSec: _endingSec,
         ));
         if (!ok) {
           if (mounted) {

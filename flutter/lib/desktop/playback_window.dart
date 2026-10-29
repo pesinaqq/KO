@@ -30,6 +30,8 @@ class PlaybackWindowArgs {
     this.fit = 'contain',
     this.volume,
     this.rate,
+    this.openingSec = 0,
+    this.endingSec = 0,
   });
 
   /// 播放器进程启动占位参数（真正参数由主进程随后下发 play）。
@@ -57,6 +59,10 @@ class PlaybackWindowArgs {
   final double? volume;
   final double? rate;
 
+  /// 片头/片尾偏移（秒），主窗口按 vod 持久化的值带入，子窗口内可调。
+  final int openingSec;
+  final int endingSec;
+
   Map<String, dynamic> toJson() => {
         'vodName': vodName,
         'title': title,
@@ -68,6 +74,8 @@ class PlaybackWindowArgs {
         'fit': fit,
         'volume': volume,
         'rate': rate,
+        'openingSec': openingSec,
+        'endingSec': endingSec,
       };
 
   static PlaybackWindowArgs? tryFromMap(Object? raw) {
@@ -87,6 +95,8 @@ class PlaybackWindowArgs {
         fit: '${a['fit'] ?? 'contain'}',
         volume: (a['volume'] as num?)?.toDouble(),
         rate: (a['rate'] as num?)?.toDouble(),
+        openingSec: (a['openingSec'] as num?)?.toInt() ?? 0,
+        endingSec: (a['endingSec'] as num?)?.toInt() ?? 0,
       );
     } catch (_) {
       return null;
@@ -117,6 +127,15 @@ class PlaybackWindow {
   /// 播放器请求切换剧集（播放器 → 主窗口，主窗口负责解析新集 URL）。
   static void Function(int epIdx)? onSwitchEpisode;
 
+  /// 播放器请求主窗口重新解析当前集（换解析器）。
+  static void Function()? onParse;
+
+  /// 播放器请求主窗口刷新当前集。
+  static void Function()? onRefresh;
+
+  /// 播放器内调整片头/片尾偏移，主窗口持久化并作为下次下发的初始值。
+  static void Function(int openingSec, int endingSec)? onOffsets;
+
   /// 主窗口启动时注册一次：启动 IPC server，接收播放器上报。
   static Future<void> initHost() async {
     if (kIsWeb) return;
@@ -126,6 +145,9 @@ class PlaybackWindow {
     };
     _ipc.onError = (m) => onPlaybackError?.call(m);
     _ipc.onSwitchEpisode = (idx) => onSwitchEpisode?.call(idx);
+    _ipc.onParse = () => onParse?.call();
+    _ipc.onRefresh = () => onRefresh?.call();
+    _ipc.onOffsets = (open, end) => onOffsets?.call(open, end);
     await _ipc.ensurePort();
   }
 
@@ -272,6 +294,17 @@ class _PlaybackWindowPageState extends State<PlaybackWindowPage>
   bool _epPanel = false;
   Timer? _switchTimeout;
 
+  // v6：主窗口播放界面功能（片头/片尾偏移、跳过、循环、稳定音量、休眠）。
+  int _openingSec = 0;
+  int _endingSec = 0;
+  bool _loopSkip = true;
+  bool _openingSeekDone = false;
+  bool _endingSkipFired = false;
+  bool _repeatOne = false;
+  bool _stableVolume = false;
+  int _sleepMinutes = 0;
+  Timer? _sleepTimer;
+
   BoxFit get _fit {
     try {
       return BoxFit.values.byName(_args.fit);
@@ -283,6 +316,8 @@ class _PlaybackWindowPageState extends State<PlaybackWindowPage>
   @override
   void initState() {
     super.initState();
+    _openingSec = _args.openingSec;
+    _endingSec = _args.endingSec;
     _initWindow();
     // 接收主进程指令（独立进程内安全地使用 window_manager 管理本窗口）。
     widget.ipc.onPlay = (m) {
@@ -296,14 +331,50 @@ class _PlaybackWindowPageState extends State<PlaybackWindowPage>
       opts: KotvMpvOpts(decodeMode: _args.decodeMode),
     );
     _mk = mk;
-    _posSub = mk.positionStream.listen((d) {
-      if (!mounted) return;
-      if (d.inSeconds == _pos.inSeconds) return;
-      setState(() => _pos = d);
-    });
+    _posSub = mk.positionStream.listen(_onPositionTick);
     // 等待主进程下发真正的播放参数。
     if (_args.playUrl.isNotEmpty) {
       unawaited(_open(_args));
+    }
+  }
+
+  /// 片头/片尾逻辑（对齐主窗口 vod_player_chrome）：
+  ///  - 片头：起播位置接近片头时跳到 opening；
+  ///  - 片尾：`ending + position >= duration` 且还有下一集 → 请求切集。
+  void _onPositionTick(Duration pos) {
+    if (!mounted) return;
+    if (pos.inSeconds != _pos.inSeconds) setState(() => _pos = pos);
+    final mk = _mk;
+    if (mk == null || !_loopSkip) {
+      _endingSkipFired = false;
+      return;
+    }
+    final dur = mk.duration;
+    if (dur.inMilliseconds <= 0) return;
+    final openMs = _openingSec * 1000;
+    final endMs = _endingSec * 1000;
+    if (openMs > 0 && !_openingSeekDone) {
+      if (pos.inMilliseconds + 800 < openMs) {
+        _openingSeekDone = true;
+        unawaited(mk.seek(Duration(milliseconds: openMs)));
+        return;
+      }
+      if (pos.inMilliseconds >= openMs) {
+        _openingSeekDone = true;
+      }
+    }
+    if (endMs > 0 && pos.inMilliseconds + endMs >= dur.inMilliseconds) {
+      if (!_endingSkipFired) {
+        _endingSkipFired = true;
+        _openingSeekDone = false;
+        if (_args.epIdx + 1 < _args.episodes.length) {
+          unawaited(_requestEpisode(_args.epIdx + 1));
+        } else {
+          _endingSkipFired = false;
+        }
+      }
+    } else {
+      _endingSkipFired = false;
     }
   }
 
@@ -354,9 +425,13 @@ class _PlaybackWindowPageState extends State<PlaybackWindowPage>
     try {
       setState(() {
         _args = args;
+        _openingSec = args.openingSec;
+        _endingSec = args.endingSec;
         _status = '加载中…';
         _pos = Duration.zero;
         _epPanel = false;
+        _openingSeekDone = false;
+        _endingSkipFired = false;
       });
       try {
         await mk.stop();
@@ -377,6 +452,16 @@ class _PlaybackWindowPageState extends State<PlaybackWindowPage>
             await mk.setVolume(args.volume!.clamp(0, 100));
           } catch (_) {}
         }
+        if (_repeatOne) {
+          try {
+            await mk.setRepeatOne(true);
+          } catch (_) {}
+        }
+        if (_stableVolume) {
+          try {
+            await _applyStableVolume(true);
+          } catch (_) {}
+        }
         if (mounted) setState(() => _status = '');
       } catch (e) {
         if (mounted) setState(() => _status = '播放失败：$e');
@@ -387,8 +472,265 @@ class _PlaybackWindowPageState extends State<PlaybackWindowPage>
     }
   }
 
+  /// 稳定音量：MPV af 滤镜（对齐主窗口 vod_player_chrome）。
+  Future<void> _applyStableVolume(bool on) async {
+    final p = _mk;
+    if (p == null) return;
+    try {
+      await (p.player.platform as dynamic).setProperty('af', on ? 'loudnorm' : '');
+    } catch (_) {
+      try {
+        await (p.player.platform as dynamic).setProperty('af', on ? 'dynaudnorm' : '');
+      } catch (_) {}
+    }
+  }
+
+  /// 调整片头/片尾偏移并上报主窗口持久化。
+  Future<void> _setOffsets(int open, int end) async {
+    setState(() {
+      _openingSec = open.clamp(0, 3600);
+      _endingSec = end.clamp(0, 3600);
+      _openingSeekDone = false;
+      _endingSkipFired = false;
+    });
+    await widget.ipc.notify(PlaybackIpcCodec.typeOffsets, {
+      'opening': _openingSec,
+      'ending': _endingSec,
+    });
+  }
+
   Future<void> _notifyClosed() async {
     await widget.ipc.notify(PlaybackIpcCodec.typeClosed);
+  }
+
+  /// 休眠定时器：到点后暂停播放并复位。
+  void _setSleepMinutes(int mins) {
+    _sleepTimer?.cancel();
+    _sleepTimer = null;
+    setState(() => _sleepMinutes = mins);
+    if (mins > 0) {
+      _sleepTimer = Timer(Duration(minutes: mins), () {
+        if (!mounted) return;
+        setState(() => _sleepMinutes = 0);
+        final mk = _mk;
+        if (mk != null) unawaited(mk.pause());
+      });
+    }
+  }
+
+  /// "更多"面板：循环播放/跳过片头片尾/稳定音量/休眠定时器/解析/刷新。
+  Future<void> _showMore() async {
+    _bumpChrome();
+    final mk = _mk;
+    if (mk == null) return;
+    await showModalBottomSheet<void>(
+      context: context,
+      backgroundColor: Colors.transparent,
+      barrierColor: Colors.black38,
+      isScrollControlled: true,
+      builder: (ctx) {
+        return StatefulBuilder(
+          builder: (ctx, setSheet) {
+            void sync(VoidCallback fn) {
+              setState(fn);
+              setSheet(() {});
+            }
+
+            Widget row({
+              required IconData icon,
+              required String label,
+              Widget? trailing,
+              VoidCallback? onTap,
+            }) {
+              return Material(
+                color: Colors.transparent,
+                child: InkWell(
+                  onTap: onTap,
+                  child: SizedBox(
+                    height: 52,
+                    child: Padding(
+                      padding: const EdgeInsets.symmetric(horizontal: 16),
+                      child: Row(
+                        children: [
+                          Icon(icon, color: Colors.white, size: 24),
+                          const SizedBox(width: 16),
+                          Expanded(
+                            child: Text(label,
+                                style: const TextStyle(
+                                    color: Colors.white,
+                                    fontSize: 16,
+                                    fontWeight: FontWeight.w500)),
+                          ),
+                          if (trailing != null) trailing,
+                        ],
+                      ),
+                    ),
+                  ),
+                ),
+              );
+            }
+
+            Widget toggle({required bool value, required ValueChanged<bool> onChanged}) {
+              return Switch.adaptive(
+                value: value,
+                activeColor: Colors.white,
+                activeTrackColor: const Color(0xFF5C5C66),
+                inactiveThumbColor: const Color(0xFFB0B0B8),
+                inactiveTrackColor: const Color(0xFF3A3A42),
+                onChanged: onChanged,
+              );
+            }
+
+            return SafeArea(
+              top: false,
+              child: Padding(
+                padding: const EdgeInsets.fromLTRB(12, 0, 12, 12),
+                child: Material(
+                  color: const Color(0xCC2A2A30),
+                  borderRadius: BorderRadius.circular(18),
+                  clipBehavior: Clip.antiAlias,
+                  child: ConstrainedBox(
+                    constraints: BoxConstraints(
+                        maxHeight: MediaQuery.sizeOf(ctx).height * 0.72),
+                    child: ListView(
+                      shrinkWrap: true,
+                      padding: const EdgeInsets.fromLTRB(4, 10, 4, 12),
+                      children: [
+                        Center(
+                          child: Container(
+                            width: 40,
+                            height: 4,
+                            decoration: BoxDecoration(
+                              color: Colors.white.withOpacity(0.28),
+                              borderRadius: BorderRadius.circular(99),
+                            ),
+                          ),
+                        ),
+                        const SizedBox(height: 10),
+                        row(
+                          icon: Icons.repeat,
+                          label: '循环播放视频',
+                          trailing: toggle(
+                            value: _repeatOne,
+                            onChanged: (v) {
+                              sync(() => _repeatOne = v);
+                              unawaited(mk.setRepeatOne(v));
+                            },
+                          ),
+                        ),
+                        row(
+                          icon: Icons.skip_next_outlined,
+                          label: '跳过片头片尾',
+                          trailing: toggle(
+                            value: _loopSkip,
+                            onChanged: (v) {
+                              sync(() {
+                                _loopSkip = v;
+                                _endingSkipFired = false;
+                                _openingSeekDone = false;
+                              });
+                              if (v) _onPositionTick(mk.position);
+                            },
+                          ),
+                        ),
+                        row(
+                          icon: Icons.graphic_eq,
+                          label: '稳定音量',
+                          trailing: toggle(
+                            value: _stableVolume,
+                            onChanged: (v) {
+                              sync(() => _stableVolume = v);
+                              unawaited(_applyStableVolume(v));
+                            },
+                          ),
+                        ),
+                        row(
+                          icon: Icons.bedtime_outlined,
+                          label: '休眠定时器',
+                          trailing: Text(
+                            _sleepMinutes <= 0 ? '关闭' : '$_sleepMinutes 分钟',
+                            style: TextStyle(
+                                color: Colors.white.withOpacity(0.55),
+                                fontSize: 15),
+                          ),
+                          onTap: () => unawaited(_pickSleepTimer(ctx)),
+                        ),
+                        row(
+                          icon: Icons.auto_awesome,
+                          label: '解析',
+                          onTap: () {
+                            Navigator.pop(ctx);
+                            unawaited(
+                                widget.ipc.notify(PlaybackIpcCodec.typeParse));
+                          },
+                        ),
+                        row(
+                          icon: Icons.refresh,
+                          label: '刷新',
+                          onTap: () {
+                            Navigator.pop(ctx);
+                            unawaited(
+                                widget.ipc.notify(PlaybackIpcCodec.typeRefresh));
+                          },
+                        ),
+                      ],
+                    ),
+                  ),
+                ),
+              ),
+            );
+          },
+        );
+      },
+    );
+  }
+
+  Future<void> _pickSleepTimer(BuildContext sheetCtx) async {
+    final picked = await showModalBottomSheet<int>(
+      context: sheetCtx,
+      backgroundColor: Colors.transparent,
+      barrierColor: Colors.black38,
+      builder: (ctx) {
+        Widget opt(String label, int mins) {
+          return InkWell(
+            onTap: () => Navigator.pop(ctx, mins),
+            child: Container(
+              height: 52,
+              alignment: Alignment.center,
+              child: Text(label,
+                  style: const TextStyle(
+                      color: Colors.white, fontSize: 16, fontWeight: FontWeight.w500)),
+            ),
+          );
+        }
+
+        return SafeArea(
+          top: false,
+          child: Padding(
+            padding: const EdgeInsets.fromLTRB(12, 0, 12, 12),
+            child: Material(
+              color: const Color(0xCC2A2A30),
+              borderRadius: BorderRadius.circular(18),
+              clipBehavior: Clip.antiAlias,
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  for (final e in [
+                    ('关闭', 0),
+                    ('10 分钟', 10),
+                    ('30 分钟', 30),
+                    ('60 分钟', 60),
+                    ('90 分钟', 90),
+                  ])
+                    opt(e.$1, e.$2),
+                ],
+              ),
+            ),
+          ),
+        );
+      },
+    );
+    if (picked != null) _setSleepMinutes(picked);
   }
 
   Future<void> _notifyError(String message) async {
@@ -455,6 +797,7 @@ class _PlaybackWindowPageState extends State<PlaybackWindowPage>
   void dispose() {
     _hideTimer?.cancel();
     _switchTimeout?.cancel();
+    _sleepTimer?.cancel();
     _posSub?.cancel();
     if (!kIsWeb) {
       try {
@@ -507,6 +850,12 @@ class _PlaybackWindowPageState extends State<PlaybackWindowPage>
     final s = d.inSeconds % 60;
     return h > 0 ? '$h:${m.toString().padLeft(2, '0')}:${s.toString().padLeft(2, '0')}'
         : '${m.toString().padLeft(2, '0')}:${s.toString().padLeft(2, '0')}';
+  }
+
+  String _fmtSec(int sec) {
+    final m = sec ~/ 60;
+    final s = sec % 60;
+    return '$m:${s.toString().padLeft(2, '0')}';
   }
 
   @override
@@ -678,6 +1027,48 @@ class _PlaybackWindowPageState extends State<PlaybackWindowPage>
                                       ),
                                     ],
                                   ),
+                                  const SizedBox(height: 4),
+                                  Row(
+                                    children: [
+                                      _BarBtn(label: '片头 -', onTap: () {
+                                        _bumpChrome();
+                                        unawaited(_setOffsets(_openingSec - 5, _endingSec));
+                                      }),
+                                      Padding(
+                                        padding: const EdgeInsets.symmetric(horizontal: 4),
+                                        child: Text('片头 ${_fmtSec(_openingSec)}',
+                                            style: const TextStyle(color: Colors.white, fontSize: 12, fontWeight: FontWeight.w600)),
+                                      ),
+                                      _BarBtn(label: '片头 +', onTap: () {
+                                        _bumpChrome();
+                                        unawaited(_setOffsets(_openingSec + 5, _endingSec));
+                                      }),
+                                      const SizedBox(width: 8),
+                                      _BarBtn(label: '片尾 -', onTap: () {
+                                        _bumpChrome();
+                                        unawaited(_setOffsets(_openingSec, _endingSec - 5));
+                                      }),
+                                      Padding(
+                                        padding: const EdgeInsets.symmetric(horizontal: 4),
+                                        child: Text('片尾 ${_fmtSec(_endingSec)}',
+                                            style: const TextStyle(color: Colors.white, fontSize: 12, fontWeight: FontWeight.w600)),
+                                      ),
+                                      _BarBtn(label: '片尾 +', onTap: () {
+                                        _bumpChrome();
+                                        unawaited(_setOffsets(_openingSec, _endingSec + 5));
+                                      }),
+                                      const SizedBox(width: 8),
+                                      _BarBtn(label: '重置', onTap: () {
+                                        _bumpChrome();
+                                        unawaited(_setOffsets(0, 0));
+                                      }),
+                                      const SizedBox(width: 8),
+                                      _BarBtn(label: '更多', accent: true, onTap: () {
+                                        _bumpChrome();
+                                        unawaited(_showMore());
+                                      }),
+                                    ],
+                                  ),
                                 ],
                               );
                             },
@@ -714,6 +1105,41 @@ class _PlaybackWindowPageState extends State<PlaybackWindowPage>
                   ),
                 ),
             ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class _BarBtn extends StatelessWidget {
+  const _BarBtn({
+    required this.label,
+    required this.onTap,
+    this.accent = false,
+  });
+
+  final String label;
+  final VoidCallback onTap;
+  final bool accent;
+
+  @override
+  Widget build(BuildContext context) {
+    return InkWell(
+      onTap: onTap,
+      borderRadius: BorderRadius.circular(6),
+      child: Container(
+        padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+        decoration: BoxDecoration(
+          color: accent ? const Color(0xFFE53955) : Colors.white12,
+          borderRadius: BorderRadius.circular(6),
+        ),
+        child: Text(
+          label,
+          style: TextStyle(
+            color: Colors.white,
+            fontSize: 12,
+            fontWeight: FontWeight.w600,
           ),
         ),
       ),
