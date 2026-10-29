@@ -365,6 +365,20 @@ class _DetailScreenState extends ConsumerState<DetailScreen> {
           _detail?.site.isNotEmpty == true ? _detail!.site : widget.site;
       unawaited(LocalPlayOffsets.set(id, site, _openingSec, _endingSec));
     };
+    // v8：独立窗口内点"换源"：idx==null 请求线路列表（回发 /sources），
+    // idx!=null 为播放器已选定线路 → 切线路并走 popup 分支回发 play。
+    PlaybackWindow.onSwitchSource = (idx) {
+      if (!mounted) return;
+      final d = _detail;
+      if (d == null || d.flags.isEmpty) return;
+      if (idx == null) {
+        unawaited(PlaybackWindow.sendSources(
+            d.flags.map((f) => f.show).toList(), _flagIdx));
+        return;
+      }
+      if (idx < 0 || idx >= d.flags.length) return;
+      _selectFlag(idx);
+    };
     _load();
   }
 

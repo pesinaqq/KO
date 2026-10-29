@@ -28,6 +28,12 @@ class PlaybackIpcCodec {
   static const String typeRefresh = 'refresh';
   static const String typeOffsets = 'offsets';
 
+  // v8：播放器窗口内直接换源。
+  //  - 播放器 → 主窗口：请求线路列表（无 idx）/ 选定第 idx 条线路（带 idx）
+  static const String typeSwitchSource = 'switchSource';
+  //  - 主窗口 → 播放器：下发线路列表与当前线路下标
+  static const String typeSources = 'sources';
+
   static String encode(Object? body) => jsonEncode(body);
 }
 
@@ -56,6 +62,11 @@ class PlaybackIpcServer {
 
   /// 播放器内调整了片头/片尾偏移，请主窗口同步持久化。
   void Function(int openingSec, int endingSec)? onOffsets;
+
+  /// v8：播放器请求换源。
+  /// [idx] 为 null 表示请求线路列表（主窗口回发 typeSources）；
+  /// 非 null 表示播放器已选定第 idx 条线路（主窗口负责切线路并回发 play）。
+  void Function(int? idx)? onSwitchSource;
 
   /// 惰性启动主进程侧 server；返回监听端口。
   Future<int> ensurePort() async {
@@ -104,6 +115,10 @@ class PlaybackIpcServer {
             final open = (body['opening'] as num?)?.toInt() ?? 0;
             final end = (body['ending'] as num?)?.toInt() ?? 0;
             onOffsets?.call(open, end);
+            break;
+          case PlaybackIpcCodec.typeSwitchSource:
+            final idx = (body['idx'] as num?)?.toInt();
+            onSwitchSource?.call(idx);
             break;
           default:
             reply = null;
@@ -174,6 +189,9 @@ class PlaybackIpcClient {
   /// 主进程请求播放器窗口置前。
   void Function()? onFocus;
 
+  /// v8：主进程下发线路列表（换源面板用）。[current] 为当前线路下标。
+  void Function(List<String> sources, int current)? onSources;
+
   PlaybackIpcClient(this.parentPort);
 
   /// 启动播放器侧 server，返回端口。
@@ -205,6 +223,16 @@ class PlaybackIpcClient {
             break;
           case '/focus':
             onFocus?.call();
+            break;
+          case '/sources':
+            final sources = (body is Map)
+                ? ((body['sources'] as List?)?.map((e) => '$e').toList() ??
+                    const <String>[])
+                : const <String>[];
+            final current = (body is Map)
+                ? ((body['current'] as num?)?.toInt() ?? 0)
+                : 0;
+            onSources?.call(sources, current);
             break;
           default:
             req.response.statusCode = HttpStatus.notFound;

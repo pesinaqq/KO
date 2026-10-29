@@ -136,6 +136,9 @@ class PlaybackWindow {
   /// 播放器内调整片头/片尾偏移，主窗口持久化并作为下次下发的初始值。
   static void Function(int openingSec, int endingSec)? onOffsets;
 
+  /// v8：播放器请求换源。[idx] 为 null 请求线路列表；非 null 已选定线路。
+  static void Function(int? idx)? onSwitchSource;
+
   /// 主窗口启动时注册一次：启动 IPC server，接收播放器上报。
   static Future<void> initHost() async {
     if (kIsWeb) return;
@@ -148,6 +151,7 @@ class PlaybackWindow {
     _ipc.onParse = () => onParse?.call();
     _ipc.onRefresh = () => onRefresh?.call();
     _ipc.onOffsets = (open, end) => onOffsets?.call(open, end);
+    _ipc.onSwitchSource = (idx) => onSwitchSource?.call(idx);
     await _ipc.ensurePort();
   }
 
@@ -256,6 +260,15 @@ class PlaybackWindow {
     await _ipc.sendToPlayer(PlaybackIpcCodec.typeFocus);
   }
 
+  /// v8：向播放器窗口下发线路列表（换源面板用）。
+  static Future<void> sendSources(List<String> sources, int current) async {
+    if (kIsWeb || _proc == null) return;
+    await _ipc.sendToPlayer(PlaybackIpcCodec.typeSources, {
+      'sources': sources,
+      'current': current,
+    });
+  }
+
   /// 请求关闭播放器进程（不等待结果；退出后由 IPC 回调复位）。
   static Future<void> close() async {
     if (kIsWeb || _proc == null) return;
@@ -330,6 +343,17 @@ class _PlaybackWindowPageState extends State<PlaybackWindowPage>
   int _sleepMinutes = 0;
   Timer? _sleepTimer;
 
+  // v8：窗口内换源（线路面板）。
+  List<String> _sources = const [];
+  int _currentSource = 0;
+  bool _sourcePanel = false;
+
+  // v8：自动连播（片尾倒计时播下一集）。
+  bool _autoNext = true;
+  int? _nextCountdown;
+  Timer? _nextTimer;
+  bool _autoNextCancelled = false;
+
   BoxFit get _fit {
     try {
       return BoxFit.values.byName(_args.fit);
@@ -351,6 +375,18 @@ class _PlaybackWindowPageState extends State<PlaybackWindowPage>
     };
     widget.ipc.onClose = () => unawaited(_close());
     widget.ipc.onFocus = () => unawaited(_focusSelf());
+    // v8：主窗口下发线路列表 → 弹换源面板。
+    widget.ipc.onSources = (sources, current) {
+      if (!mounted) return;
+      setState(() {
+        _sources = List<String>.from(sources);
+        _currentSource = current;
+        _epPanel = false;
+        _sourcePanel = sources.length > 1;
+        if (sources.isNotEmpty && sources.length <= 1) _status = '仅一条线路';
+      });
+      _bumpChrome();
+    };
     final mk = MediaKitPlayback(
       kotvCreateMpvPlayer(),
       opts: KotvMpvOpts(decodeMode: _args.decodeMode),
@@ -365,20 +401,18 @@ class _PlaybackWindowPageState extends State<PlaybackWindowPage>
 
   /// 片头/片尾逻辑（对齐主窗口 vod_player_chrome）：
   ///  - 片头：起播位置接近片头时跳到 opening；
-  ///  - 片尾：`ending + position >= duration` 且还有下一集 → 请求切集。
+  ///  - 片尾 A：配置了片尾偏移（ending>0）且开启跳过 → 到片尾立即请求切集；
+  ///  - 片尾 B：v8 自动连播——无片尾跳过时，剩 5 秒显示倒计时播下一集。
   void _onPositionTick(Duration pos) {
     if (!mounted) return;
     if (pos.inSeconds != _pos.inSeconds) setState(() => _pos = pos);
     final mk = _mk;
-    if (mk == null || !_loopSkip) {
-      _endingSkipFired = false;
-      return;
-    }
+    if (mk == null) return;
     final dur = mk.duration;
     if (dur.inMilliseconds <= 0) return;
     final openMs = _openingSec * 1000;
     final endMs = _endingSec * 1000;
-    if (openMs > 0 && !_openingSeekDone) {
+    if (_loopSkip && openMs > 0 && !_openingSeekDone) {
       if (pos.inMilliseconds + 800 < openMs) {
         _openingSeekDone = true;
         unawaited(mk.seek(Duration(milliseconds: openMs)));
@@ -388,19 +422,72 @@ class _PlaybackWindowPageState extends State<PlaybackWindowPage>
         _openingSeekDone = true;
       }
     }
-    if (endMs > 0 && pos.inMilliseconds + endMs >= dur.inMilliseconds) {
+    // 片尾 A：有片尾偏移且开启跳过 → 到片尾立即切集（保持 v6 行为）。
+    if (_loopSkip && endMs > 0 && pos.inMilliseconds + endMs >= dur.inMilliseconds) {
       if (!_endingSkipFired) {
         _endingSkipFired = true;
         _openingSeekDone = false;
+        _cancelAutoNext();
         if (_args.epIdx + 1 < _args.episodes.length) {
           unawaited(_requestEpisode(_args.epIdx + 1));
         } else {
           _endingSkipFired = false;
         }
       }
-    } else {
-      _endingSkipFired = false;
+      return;
     }
+    _endingSkipFired = false;
+    // 片尾 B：自动连播倒计时（无片尾跳过路径时，剩 5 秒激活）。
+    final hasNext = _args.epIdx + 1 < _args.episodes.length;
+    final nearEnd = pos.inMilliseconds + 5000 >= dur.inMilliseconds;
+    if (_autoNext && !_autoNextCancelled && hasNext && !_repeatOne && nearEnd) {
+      if (_nextCountdown == null) {
+        setState(() => _nextCountdown = 5);
+        _startAutoNextTimer();
+      }
+    } else if (_nextCountdown != null && !nearEnd) {
+      // 用户拖回中段/换集：取消倒计时。
+      _cancelAutoNext();
+    }
+  }
+
+  /// 启动片尾连播倒计时（每秒递减，归零后请求下一集）。
+  void _startAutoNextTimer() {
+    _nextTimer?.cancel();
+    _nextTimer = Timer.periodic(const Duration(seconds: 1), (t) {
+      if (!mounted) {
+        t.cancel();
+        return;
+      }
+      final left = (_nextCountdown ?? 0) - 1;
+      if (left <= 0) {
+        t.cancel();
+        _nextTimer = null;
+        final idx = _args.epIdx + 1;
+        _nextCountdown = null;
+        setState(() {});
+        unawaited(_requestEpisode(idx));
+      } else {
+        setState(() => _nextCountdown = left);
+      }
+    });
+  }
+
+  /// 取消片尾连播倒计时（保留 _autoNextCancelled 状态由调用方决定）。
+  void _cancelAutoNext() {
+    _nextTimer?.cancel();
+    _nextTimer = null;
+    if (_nextCountdown != null && mounted) {
+      setState(() => _nextCountdown = null);
+    }
+  }
+
+  /// 新集开始/换集/换源：复位连播状态（允许本次继续自动连播）。
+  void _resetAutoNext() {
+    _nextTimer?.cancel();
+    _nextTimer = null;
+    _nextCountdown = null;
+    _autoNextCancelled = false;
   }
 
   /// 播放器进程内用 window_manager 常规管理本窗口——独立进程里
@@ -447,6 +534,7 @@ class _PlaybackWindowPageState extends State<PlaybackWindowPage>
     if (mk == null || _busy) return;
     _busy = true;
     _switchTimeout?.cancel();
+    _resetAutoNext();
     try {
       setState(() {
         _args = args;
@@ -670,6 +758,19 @@ class _PlaybackWindowPageState extends State<PlaybackWindowPage>
                           ),
                         ),
                         row(
+                          icon: Icons.playlist_play,
+                          label: '自动连播',
+                          trailing: toggle(
+                            value: _autoNext,
+                            onChanged: (v) {
+                              sync(() {
+                                _autoNext = v;
+                                if (!v) _cancelAutoNext();
+                              });
+                            },
+                          ),
+                        ),
+                        row(
                           icon: Icons.bedtime_outlined,
                           label: '休眠定时器',
                           trailing: Text(
@@ -768,6 +869,7 @@ class _PlaybackWindowPageState extends State<PlaybackWindowPage>
     final mk = _mk;
     if (mk == null) return;
     _switchTimeout?.cancel();
+    _cancelAutoNext();
     setState(() {
       _epPanel = false;
       _status = '切换中…';
@@ -780,6 +882,24 @@ class _PlaybackWindowPageState extends State<PlaybackWindowPage>
     });
     await widget.ipc.notify(
         PlaybackIpcCodec.typeSwitchEpisode, {'epIdx': idx});
+  }
+
+  /// v8：请求主窗口下发线路列表 → 弹出换源面板（仅一条线路时不弹）。
+  Future<void> _requestSources() async {
+    _bumpChrome();
+    setState(() => _sourcePanel = false);
+    await widget.ipc.notify(PlaybackIpcCodec.typeSwitchSource);
+  }
+
+  /// v8：选定第 [i] 条线路 → 通知主窗口切线路并回发 play 重播。
+  Future<void> _selectSource(int i) async {
+    _cancelAutoNext();
+    setState(() {
+      _sourcePanel = false;
+      _status = '换源中…';
+    });
+    await widget.ipc.notify(
+        PlaybackIpcCodec.typeSwitchSource, {'idx': i});
   }
 
   Future<void> _close() async {
@@ -1031,6 +1151,7 @@ class _PlaybackWindowPageState extends State<PlaybackWindowPage>
                                             onChanged: dur.inMilliseconds > 0
                                                 ? (v) {
                                                     final t = Duration(milliseconds: v.round());
+                                                    _cancelAutoNext();
                                                     setState(() => _pos = t);
                                                     unawaited(mk.seek(t));
                                                   }
@@ -1047,7 +1168,10 @@ class _PlaybackWindowPageState extends State<PlaybackWindowPage>
                                         icon: const Icon(Icons.video_library_outlined, color: Colors.white, size: 22),
                                         onPressed: () {
                                           _bumpChrome();
-                                          setState(() => _epPanel = !_epPanel);
+                                          setState(() {
+                                            _epPanel = !_epPanel;
+                                            _sourcePanel = false;
+                                          });
                                         },
                                       ),
                                     ],
@@ -1088,6 +1212,11 @@ class _PlaybackWindowPageState extends State<PlaybackWindowPage>
                                         unawaited(_setOffsets(0, 0));
                                       }),
                                       const SizedBox(width: 8),
+                                      _BarBtn(label: '换源', accent: true, onTap: () {
+                                        _bumpChrome();
+                                        unawaited(_requestSources());
+                                      }),
+                                      const SizedBox(width: 8),
                                       _BarBtn(label: '更多', accent: true, onTap: () {
                                         _bumpChrome();
                                         unawaited(_showMore());
@@ -1101,6 +1230,93 @@ class _PlaybackWindowPageState extends State<PlaybackWindowPage>
                   ),
                 ),
               ),
+              // v8：换源面板（线路列表，同选集面板样式）。
+              if (_sourcePanel && _sources.isNotEmpty)
+                Positioned(
+                  left: 0,
+                  right: 0,
+                  bottom: 84,
+                  child: Material(
+                    color: Colors.black.withOpacity(0.88),
+                    child: ConstrainedBox(
+                      constraints: const BoxConstraints(maxHeight: 160),
+                      child: SingleChildScrollView(
+                        padding: const EdgeInsets.all(12),
+                        child: Wrap(
+                          spacing: 8,
+                          runSpacing: 8,
+                          children: [
+                            for (var i = 0; i < _sources.length; i++)
+                              _EpButton(
+                                label: _sources[i],
+                                active: i == _currentSource,
+                                onTap: () => unawaited(_selectSource(i)),
+                              ),
+                          ],
+                        ),
+                      ),
+                    ),
+                  ),
+                ),
+              // v8：片尾自动连播倒计时（腾讯式"下一集 N 秒后播放"）。
+              if (_nextCountdown != null && _args.epIdx + 1 < _args.episodes.length)
+                Positioned(
+                  left: 0,
+                  right: 0,
+                  bottom: 120,
+                  child: Center(
+                    child: Container(
+                      padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+                      decoration: BoxDecoration(
+                        color: Colors.black.withOpacity(0.78),
+                        borderRadius: BorderRadius.circular(12),
+                      ),
+                      child: Row(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          Text(
+                            '下一集：${_args.episodes[_args.epIdx + 1]}  $_nextCountdown 秒后播放',
+                            style: const TextStyle(color: Colors.white, fontSize: 14, fontWeight: FontWeight.w600),
+                          ),
+                          const SizedBox(width: 12),
+                          InkWell(
+                            onTap: () {
+                              _cancelAutoNext();
+                              unawaited(_requestEpisode(_args.epIdx + 1));
+                            },
+                            borderRadius: BorderRadius.circular(6),
+                            child: Container(
+                              padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
+                              decoration: BoxDecoration(
+                                color: const Color(0xFFE53955),
+                                borderRadius: BorderRadius.circular(6),
+                              ),
+                              child: const Text('立即播放',
+                                  style: TextStyle(color: Colors.white, fontSize: 13, fontWeight: FontWeight.w700)),
+                            ),
+                          ),
+                          const SizedBox(width: 8),
+                          InkWell(
+                            onTap: () {
+                              setState(() => _autoNextCancelled = true);
+                              _cancelAutoNext();
+                            },
+                            borderRadius: BorderRadius.circular(6),
+                            child: Container(
+                              padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
+                              decoration: BoxDecoration(
+                                color: Colors.white12,
+                                borderRadius: BorderRadius.circular(6),
+                              ),
+                              child: const Text('取消',
+                                  style: TextStyle(color: Colors.white70, fontSize: 13)),
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                  ),
+                ),
               // 选集面板
               if (_epPanel && _args.episodes.isNotEmpty)
                 Positioned(
