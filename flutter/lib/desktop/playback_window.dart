@@ -115,6 +115,11 @@ class PlaybackWindow {
   static final PlaybackIpcServer _ipc = PlaybackIpcServer();
   static Process? _proc;
 
+  /// 播放器是否由用户主动关闭（上报过 typeClosed）。
+  /// false = 进程异常退出/未就绪（主窗口回退内置播放兜底仍有效）。
+  static bool _userClosed = false;
+  static bool get closedByUser => _userClosed;
+
   /// 独立播放器进程是否已启动。
   static bool get open => _proc != null;
 
@@ -143,6 +148,8 @@ class PlaybackWindow {
   static Future<void> initHost() async {
     if (kIsWeb) return;
     _ipc.onClosed = () {
+      // 播放器上报 typeClosed = 用户主动关闭（点 X / Esc / 主窗口主动关）。
+      _userClosed = true;
       _proc = null;
       onPlaybackClosed?.call();
     };
@@ -167,6 +174,9 @@ class PlaybackWindow {
   /// 返回 false 表示独立播放器不可用（调用方回退内嵌播放）。
   static Future<bool> play(PlaybackWindowArgs args) async {
     if (kIsWeb) return false;
+    // 用户已主动关闭播放窗口（typeClosed 已上报）：不再拉起新进程，
+    // 直接返回失败，由调用方按"用户关闭"语义停止。
+    if (_userClosed) return false;
     final existing = _proc;
     if (existing != null) {
       final ok = await _ipc.sendToPlayer(PlaybackIpcCodec.typePlay, args.toJson());
@@ -201,6 +211,8 @@ class PlaybackWindow {
         mode: ProcessStartMode.normal,
       );
       _proc = proc;
+      // 新进程刚启动：用户并未关闭它，复位关闭标志（异常退出时由 exitCode 置 false）。
+      _userClosed = false;
       // 读播放器上报的端口行（纯 ASCII，避免 Windows 控制台编码问题）。
       final lines = proc.stdout
           .transform(utf8.decoder)
@@ -211,11 +223,13 @@ class PlaybackWindow {
           if (p != null) _ipc.playerPort = p;
         }
       });
-      // 播放器进程退出：复位。
+      // 播放器进程退出：复位。未上报 typeClosed 直接退出 = 异常/不可用，
+      // 置 _userClosed=false，主窗口内嵌兜底仍有效。
       unawaited(proc.exitCode.then((_) {
         sub.cancel();
         if (identical(_proc, proc)) {
           _proc = null;
+          _userClosed = false;
           onPlaybackClosed?.call();
         }
       }));

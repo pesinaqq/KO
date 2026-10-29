@@ -125,6 +125,8 @@ class _DetailScreenState extends ConsumerState<DetailScreen> {
   VoidCallback? _playbackNotify;
   bool _openingSeekDone = false;
   bool _stoppedHard = false;
+  /// 独立播放窗口是否被用户主动关闭（v8.1：关闭后不再回退内置播放）。
+  bool _popupClosed = false;
   /// 硬停完成后再允许真正出栈（配合 [PopScope]）。
   bool _allowPop = false;
   /// 每次 [_playAt] 一代；仅本代真正进入可播（≈STATE_READY）后才允许自动连播。
@@ -324,6 +326,9 @@ class _DetailScreenState extends ConsumerState<DetailScreen> {
     // 独立播放窗口关闭 / 出错时复位本页状态。
     PlaybackWindow.onPlaybackClosed = () {
       if (!mounted) return;
+      // 用户主动关闭 → 后续在途播放请求直接停止，不转内置；
+      // 异常退出 → closedByUser=false，仍可回退内置兜底。
+      _popupClosed = PlaybackWindow.closedByUser;
       setState(() {
         _playUrl = '';
         _status = '已停止';
@@ -338,18 +343,19 @@ class _DetailScreenState extends ConsumerState<DetailScreen> {
     };
     // 独立窗口内点选集：由主窗口解析新集 URL 并切集。
     PlaybackWindow.onSwitchEpisode = (idx) {
-      if (!mounted) return;
+      // 播放器已关闭（竞态中残留请求）：忽略，避免关闭后被重新拉起/转内置。
+      if (!mounted || !PlaybackWindow.open) return;
       if (idx < 0 || idx >= _eps.length) return;
       unawaited(_playAt(idx));
     };
     // 独立窗口内点"解析"：主窗口选解析器后重播当前集（回发 play）。
     PlaybackWindow.onParse = () {
-      if (!mounted) return;
+      if (!mounted || !PlaybackWindow.open) return;
       unawaited(_pickParse());
     };
     // 独立窗口内点"刷新"：主窗口重新解析当前集。
     PlaybackWindow.onRefresh = () {
-      if (!mounted) return;
+      if (!mounted || !PlaybackWindow.open) return;
       if (_epIdx >= 0) unawaited(_playAt(_epIdx));
     };
     // 独立窗口内调整片头/片尾偏移：主窗口同步状态并持久化，
@@ -368,7 +374,8 @@ class _DetailScreenState extends ConsumerState<DetailScreen> {
     // v8：独立窗口内点"换源"：idx==null 请求线路列表（回发 /sources），
     // idx!=null 为播放器已选定线路 → 切线路并走 popup 分支回发 play。
     PlaybackWindow.onSwitchSource = (idx) {
-      if (!mounted) return;
+      // 播放器已关闭：忽略（idx==null 的线路请求同理）。
+      if (!mounted || !PlaybackWindow.open) return;
       final d = _detail;
       if (d == null || d.flags.isEmpty) return;
       if (idx == null) {
@@ -888,6 +895,9 @@ class _DetailScreenState extends ConsumerState<DetailScreen> {
   }
 
   Future<void> _playAt(int epIdx, {bool fullscreen = false}) async {
+    // 新一轮播放发起：清除上一轮"用户已关闭播放窗口"标志。
+    // 若本代执行期间用户又关闭了播放窗口，onPlaybackClosed 会重新置位。
+    _popupClosed = false;
     final d = _detail;
     if (d == null || d.flags.isEmpty) return;
     final flag = d.flags[_flagIdx.clamp(0, d.flags.length - 1)];
@@ -1047,6 +1057,16 @@ class _DetailScreenState extends ConsumerState<DetailScreen> {
           endingSec: _endingSec,
         ));
         if (!ok) {
+          if (_popupClosed) {
+            // 用户已主动关闭独立播放窗口：不转内置，直接停止。
+            if (mounted) {
+              setState(() {
+                _playUrl = '';
+                _status = '已停止';
+              });
+            }
+            return;
+          }
           if (mounted) {
             setState(() => _status = epLooksMagnet ? '磁力缓冲中…' : '加载中…');
           }
@@ -1716,13 +1736,13 @@ class _DetailScreenState extends ConsumerState<DetailScreen> {
           child: ListView(
             scrollDirection: Axis.horizontal,
             children: [
-            _action('全屏', Icons.crop_free_rounded, () {
+            _action('播放', Icons.play_arrow_rounded, () {
               if (_playUrl.isNotEmpty) {
                 unawaited(_enterFullscreen());
               } else if (_epIdx >= 0) {
-                unawaited(_playAt(_epIdx, fullscreen: true));
+                unawaited(_playAt(_epIdx));
               } else if (eps.isNotEmpty) {
-                unawaited(_playAt(0, fullscreen: true));
+                unawaited(_playAt(0));
               }
             }),
             _action('搜索', Icons.search_rounded, () {
