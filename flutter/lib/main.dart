@@ -110,10 +110,25 @@ Future<void> main() async {
     final savedH = prefs.getDouble('window_h');
     final savedX = prefs.getDouble('window_x');
     final savedY = prefs.getDouble('window_y');
-    final size = Size(
+    var size = Size(
       (savedW ?? 1280).clamp(kotvMinWindowSize.width, 10000),
       (savedH ?? 720).clamp(kotvMinWindowSize.height, 10000),
     );
+    // 首次启动（未保存过窗口尺寸）：按主显示器分辨率取 80% 比例，
+    // 避免固定 1280x720 在 4K/高分屏上偏小、在小分辨率屏上放不下。
+    if (savedW == null || savedH == null) {
+      try {
+        final disp = await windowManager.getPrimaryDisplay();
+        final dw = disp.size.width;
+        final dh = disp.size.height;
+        if (dw > 0 && dh > 0) {
+          size = Size(
+            (dw * 0.8).clamp(kotvMinWindowSize.width, 10000),
+            (dh * 0.8).clamp(kotvMinWindowSize.height, 10000),
+          );
+        }
+      } catch (_) {}
+    }
     final opts = WindowOptions(
       size: size,
       minimumSize: kotvMinWindowSize,
