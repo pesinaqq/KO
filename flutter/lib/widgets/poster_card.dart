@@ -175,13 +175,15 @@ class PosterFlow extends StatelessWidget {
     return LayoutBuilder(
       builder: (context, c) {
         final compact = KotvLayout.isCompact(context);
-        // 用逻辑宽度算列数，不要乘 scale，否则缩得越小列越多、海报越矮
+        // v8.6：海报随窗口自动缩放——cell 基准随窗口 scale 缩放：
+        // 拉大窗口海报放大、缩小窗口海报缩小；窄屏固定 3 列自然缩放。
+        final s = LayoutScale.of(context);
         final gap = compact ? 6.0 : 10.0;
         final pad = compact ? const EdgeInsets.fromLTRB(12, 8, 12, 16) : padding;
         final inner = c.maxWidth - pad.horizontal;
-        // 窄屏强制 3 列；宽屏按 200px cell 算
-        final cross = compact ? 3 : (inner / (200.0 + gap)).floor().clamp(3, 6);
-        return GridView.builder(
+        final cellW = 200.0 * s;
+        // 窄屏强制 3 列；宽屏按缩放后的 cell 算列数（上限 8）。
+        final cross = compact ? 3 : (inner / (cellW + gap)).floor().clamp(3, 8);
           padding: pad,
           gridDelegate: SliverGridDelegateWithFixedCrossAxisCount(
             crossAxisCount: cross,
