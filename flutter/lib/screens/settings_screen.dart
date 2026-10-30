@@ -864,7 +864,7 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
                             onTap: () => _set(
                               'popupPlayer',
                               popupOn ? 'false' : 'true',
-                              msg: popupOn ? '已改为内嵌播放' : '已改为独立窗口播放',
+                              msg: popupOn ? '已改为独立窗口播放' : '已改为内嵌播放',
                             ),
                           ),
                         ],
