@@ -174,9 +174,10 @@ class PlaybackWindow {
   /// 返回 false 表示独立播放器不可用（调用方回退内嵌播放）。
   static Future<bool> play(PlaybackWindowArgs args) async {
     if (kIsWeb) return false;
-    // 用户已主动关闭播放窗口（typeClosed 已上报）：不再拉起新进程，
-    // 直接返回失败，由调用方按"用户关闭"语义停止。
-    if (_userClosed) return false;
+    // v8.3：用户主动再次播放 = 新的播放意图——即使上次播放窗口被用户
+    // 主动关闭（typeClosed 已上报），也重新拉起播放器进程。关闭后残留的
+    // 自动/在途切集、解析、刷新请求由 detail_screen 的 PlaybackWindow.open
+    // 保护拦截，不会在这里误拉起新窗口。
     final existing = _proc;
     if (existing != null) {
       final ok = await _ipc.sendToPlayer(PlaybackIpcCodec.typePlay, args.toJson());
