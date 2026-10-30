@@ -654,10 +654,12 @@ class _DetailScreenState extends ConsumerState<DetailScreen> {
         _prefPlayerVal = _playerVal;
         final failoverMode = '${settings['playerFailover'] ?? 'auto'}'.trim().toLowerCase();
         _prefPlayerFailover = (failoverMode == 'off' || failoverMode == 'false') ? 'off' : 'auto';
-        // 桌面端独立播放窗口：v8.2 起桌面端强制独立窗口（不需要内置播放），
-        // 设置项 popupPlayer 仅在移动端有意义。
-        final popupRaw = '${settings['popupPlayer'] ?? ''}'.trim();
-        _popupPlayer = kotvIsDesktop() || popupRaw.toLowerCase() == 'true';
+        // 独立播放窗口：桌面端开关生效。开启=独立窗口；关闭=主窗口内嵌 MPV。
+        // v8.5：恢复开关作用（v8.2 曾桌面端强制独立窗口，开关形同虚设）。
+        final popupRaw =
+            '${settings['popupPlayer'] ?? (kotvIsDesktop() ? 'true' : 'false')}'
+                .trim();
+        _popupPlayer = popupRaw.toLowerCase() == 'true';
         // 绝不在进详情时创建 Player：libmpv 初始化 + VideoController 附着会卡死 UI / 手机闪退。
         // 音量/倍速等偏好先记下，真正 [_playAt] open 后再套。
         _prefSpeed = double.tryParse('${settings['playerSpeed'] ?? ''}');
@@ -1024,9 +1026,10 @@ class _DetailScreenState extends ConsumerState<DetailScreen> {
         lockExoForDrm: hasDrm && kotvIsAndroid(),
         enabled: KotvPlaybackFailover.enabledFromSetting(_prefPlayerFailover),
       );
-      // 独立播放窗口模式（桌面端）：解析已完成，交给独立播放器起播。
-      // v8.2：桌面端一律独立窗口（不需要内置播放），不再回退内嵌 MPV。
-      if (!kIsWeb &&
+      // 独立播放窗口模式（桌面端 + 开关开启）：解析已完成，交给独立播放器起播。
+      // v8.5：开关关闭时回退主窗口内嵌 MPV 播放（走下方 failover 分支）。
+      if (_popupPlayer &&
+          !kIsWeb &&
           (Platform.isWindows || Platform.isMacOS || Platform.isLinux)) {
         await _stopInactiveBackends(_backend);
         if (serial != _playAtSerial || !mounted) return;
