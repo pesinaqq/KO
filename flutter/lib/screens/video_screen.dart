@@ -1013,13 +1013,16 @@ class _VideoScreenState extends ConsumerState<VideoScreen> {
     return SliverLayoutBuilder(
       builder: (context, constraints) {
         final compact = KotvLayout.isCompact(context);
-        // 列数按逻辑宽度算，避免 scale 越小列越多、海报被压成扁条
-        // 窄屏固定 3 列，不再按 cell 宽度计算（竖屏宽度有限，避免只出 2 列）
+        // v8.6：海报随窗口自动缩放——cell 基准随窗口 scale 缩放：
+        // 拉大窗口海报放大、缩小窗口海报缩小；窄屏固定 3 列自然缩放。
+        // 上限提到 8 列，避免超宽窗口海报一直不放大。
+        final s = LayoutScale.of(context);
         final gap = compact ? 6.0 : 10.0;
         final extent = constraints.crossAxisExtent;
+        final cellW = 200.0 * s;
         final cross = !extent.isFinite || extent <= 0
             ? (compact ? 3 : 4)
-            : (compact ? 3 : (extent / (200.0 + gap)).floor().clamp(3, 5));
+            : (compact ? 3 : (extent / (cellW + gap)).floor().clamp(3, 8));
         return SliverGrid(
           gridDelegate: SliverGridDelegateWithFixedCrossAxisCount(
             crossAxisCount: cross,
