@@ -184,6 +184,7 @@ class PosterFlow extends StatelessWidget {
         final cellW = 200.0 * s;
         // 窄屏强制 3 列；宽屏按缩放后的 cell 算列数（上限 8）。
         final cross = compact ? 3 : (inner / (cellW + gap)).floor().clamp(3, 8);
+        return GridView.builder(
           padding: pad,
           gridDelegate: SliverGridDelegateWithFixedCrossAxisCount(
             crossAxisCount: cross,
