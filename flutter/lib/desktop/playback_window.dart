@@ -212,6 +212,9 @@ class PlaybackWindow {
         mode: ProcessStartMode.normal,
       );
       _proc = proc;
+      // v8.4：清掉上一轮播放器残留的端口，等本次新进程自己上报；
+      // 否则下面“等端口”的 while 会被旧值短路，往已退出的旧进程下发失败。
+      _ipc.playerPort = null;
       // 新进程刚启动：用户并未关闭它，复位关闭标志（异常退出时由 exitCode 置 false）。
       _userClosed = false;
       // 读播放器上报的端口行（纯 ASCII，避免 Windows 控制台编码问题）。
@@ -230,6 +233,8 @@ class PlaybackWindow {
         sub.cancel();
         if (identical(_proc, proc)) {
           _proc = null;
+          // v8.4：进程已退出，同步清端口，保证下次等待新进程上报不被旧值短路。
+          _ipc.playerPort = null;
           _userClosed = false;
           onPlaybackClosed?.call();
         }
