@@ -825,7 +825,6 @@ func (a *App) APIGetSettings() map[string]any {
 	keys := []settings.Type{
 		settings.VOD, settings.LIVE, settings.Theme, settings.Player, settings.PlayerLive,
 		settings.PopupPlayer,
-		settings.PopupPlayer,
 		settings.Proxy, settings.PlayerSpeed, settings.PlayerScale, settings.PlayerDecode,
 		settings.PlayerFailover,
 		settings.PlayerVolume, settings.PlayerAmbient, settings.PlayerStableVolume,
