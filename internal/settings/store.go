@@ -22,6 +22,7 @@ const (
 	LOG                Type = "log"
 	Player             Type = "player"     // 点播播放器
 	PlayerLive         Type = "playerLive" // 直播播放器（与点播独立）
+	PopupPlayer        Type = "popupPlayer" // 桌面端独立播放窗口开关（true=独立窗口 / false=内嵌）
 	Proxy              Type = "proxy"
 	Theme              Type = "theme"
 	AdFilter           Type = "adFilter"
