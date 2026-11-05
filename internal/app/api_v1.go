@@ -2,6 +2,7 @@ package app
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"net/url"
 	"path"
@@ -425,7 +426,7 @@ func (a *App) APIPlay(siteKey, vodID, flag, episodeURL string, qualIdx int) (map
 		}
 		playDrm = result.Drm
 		headers = map[string]string(result.Header)
-		danmakuURL = result.Danmaku
+		danmakuURL = normalizeDanmaku(result.Danmaku.String())
 		qualNames = result.URL.Names
 		qualURLs = result.URL.URLs
 		api := cfg.API()
@@ -471,7 +472,7 @@ func (a *App) APIPlay(siteKey, vodID, flag, episodeURL string, qualIdx int) (map
 			qualURLs = result.URL.URLs
 			playURL = apiResolvePlayURL("", result.PlayURL, result.URL.URLs, qualIdx)
 			if result.Danmaku != "" {
-				danmakuURL = result.Danmaku
+				danmakuURL = normalizeDanmaku(result.Danmaku.String())
 			}
 		}
 	}
@@ -1564,4 +1565,46 @@ func errString(err error) string {
 		return ""
 	}
 	return err.Error()
+}
+
+
+// normalizeDanmaku 兼容非标准源返回的 danmaku 字段：
+// 正常是 string URL；部分源返回 ["url"] 或 {"url":"...","type":"..."} 形式。
+// 提取干净 URL，避免弹幕加载失败。
+func normalizeDanmaku(raw string) string {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return ""
+	}
+	if raw[0] == '[' {
+		var arr []string
+		if err := json.Unmarshal([]byte(raw), &arr); err == nil {
+			for _, u := range arr {
+				if u = strings.TrimSpace(u); u != "" {
+					return u
+				}
+			}
+		}
+		var any []any
+		if err := json.Unmarshal([]byte(raw), &any); err == nil {
+			for _, v := range any {
+				if u, ok := v.(string); ok && strings.TrimSpace(u) != "" {
+					return strings.TrimSpace(u)
+				}
+			}
+		}
+		return ""
+	}
+	if raw[0] == '{' {
+		var m map[string]any
+		if err := json.Unmarshal([]byte(raw), &m); err == nil {
+			for _, k := range []string{"url", "api", "server", "host", "link"} {
+				if u, ok := m[k].(string); ok && strings.TrimSpace(u) != "" {
+					return strings.TrimSpace(u)
+				}
+			}
+		}
+		return ""
+	}
+	return raw
 }
