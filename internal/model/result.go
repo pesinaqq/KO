@@ -17,7 +17,7 @@ type Result struct {
 	Parse     FlexInt    `json:"parse"`
 	Jx        FlexInt    `json:"jx"`
 	Flag      string     `json:"flag"`
-	Danmaku   string     `json:"danmaku"`
+	Danmaku   FlexString `json:"danmaku"`
 	Format    string     `json:"format"`
 	URL       URL        `json:"url"`
 	Key       string     `json:"key"`
